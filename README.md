@@ -6,8 +6,6 @@
 
 ## Overview
 
-## Overview
-
 **ReefTag** is a Python desktop application for identifying, annotating and cataloguing fish in underwater photographs.
 
 Developed following a visit to the Maldives in October 2026, ReefTag is the latest in a series of small software projects inspired by the underwater photographs and video footage collected during the trip. Where _ReefFrame_ enhances and processes underwater footage, and _FishTrack_ explores the detection and tracking of fish within video sequences, _ReefTag_ addresses a different question:
