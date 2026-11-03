@@ -1,0 +1,427 @@
+"""Folder browsing, footage dates and annotation workflow coordination."""
+
+import logging
+import sqlite3
+from datetime import date
+from pathlib import Path
+
+from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QIcon, QImageReader, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QDateEdit,
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSlider,
+    QSplitter,
+    QStyle,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from reef_tag.files import discover_images
+from reef_tag.models import Identification
+from reef_tag.preferences import Preferences, PreviewSettings
+from reef_tag.repositories import Repository
+from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
+from reef_tag.ui.species_dialog import SpeciesDialog
+
+LOGGER = logging.getLogger(__name__)
+ICON_PATH = Path(__file__).parents[1] / "resources" / "reeftag.png"
+
+
+def make_table(headers: list[str]) -> QTableWidget:
+    """Create a read-only row-selection table with stretching name columns."""
+    table = QTableWidget(0, len(headers))
+    table.setHorizontalHeaderLabels(headers)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setAlternatingRowColors(True)
+    table.verticalHeader().hide()
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    if headers[0] == "Position":
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+    if headers[-1] == "Size (MiB)":
+        table.horizontalHeader().setSectionResizeMode(
+            len(headers) - 1, QHeaderView.ResizeMode.ResizeToContents
+        )
+    return table
+
+
+def fill_table(table: QTableWidget, rows: list[list[str]]) -> None:
+    """Replace table contents while preserving supplied deterministic order."""
+    table.setRowCount(len(rows))
+    for row_number, row in enumerate(rows):
+        for column, value in enumerate(row):
+            item = QTableWidgetItem(value)
+            item.setToolTip(value)
+            table.setItem(row_number, column, item)
+
+
+class MainWindow(QMainWindow):
+    """Coordinate the manual image identification workflow."""
+
+    def __init__(self, repository: Repository, preferences: Preferences | None = None) -> None:
+        """Build the two-column workspace and load the shared catalogue."""
+        super().__init__()
+        self.repository = repository
+        self.preferences = preferences if preferences is not None else Preferences()
+        self.folder: Path | None = None
+        self.paths: list[Path] = []
+        self.current_path: Path | None = None
+        self.annotations: list[Identification] = []
+        self.pending_dates: dict[Path, date] = {}
+        self.session_date = date.today()
+        self.setWindowTitle(
+            "ReefTag — Identify, annotate and catalogue fish in underwater photographs"
+        )
+        self.setWindowIcon(QIcon(str(ICON_PATH)))
+        self.resize(1250, 800)
+        splitter = QSplitter()
+        self.setCentralWidget(splitter)
+        left, right = QWidget(), QWidget()
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([760, 490])
+        workspace = QVBoxLayout(left)
+        heading = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(
+            QPixmap(str(ICON_PATH)).scaled(
+                64,
+                64,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        heading.addWidget(icon)
+        title = QLabel(
+            "<h1>ReefTag</h1>Identify, annotate and catalogue fish in underwater photographs"
+        )
+        heading.addWidget(title, 1)
+        workspace.addLayout(heading)
+        self.folder_text = QLineEdit()
+        self.folder_text.setReadOnly(True)
+        self.folder_text.setPlaceholderText("No folder selected")
+        workspace.addWidget(self.folder_text)
+        self.preview = ImageView()
+        workspace.addWidget(self.preview, 1)
+        self.brightness_controls = QWidget()
+        preview_controls_layout = QHBoxLayout(self.brightness_controls)
+        preview_controls_layout.setContentsMargins(0, 0, 0, 0)
+        brightness_label = QLabel("Brightness")
+        self.brightness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.brightness_slider.setRange(MIN_BRIGHTNESS, MAX_BRIGHTNESS)
+        self.brightness_slider.setValue(0)
+        self.brightness_slider.setAccessibleName("Preview brightness")
+        self.brightness_slider.setToolTip("Adjust the preview only; original images are unchanged.")
+        brightness_label.setBuddy(self.brightness_slider)
+        self.brightness_value = QLabel("0")
+        self.brightness_value.setMinimumWidth(36)
+        self.brightness_reset = QPushButton("Reset")
+        self.brightness_reset.clicked.connect(self.reset_preview)
+        self.brightness_reset.setToolTip("Reset brightness, zoom and pan.")
+        self.brightness_slider.valueChanged.connect(self.change_brightness)
+        preview_controls_layout.addWidget(brightness_label)
+        preview_controls_layout.addWidget(self.brightness_slider, 1)
+        preview_controls_layout.addWidget(self.brightness_value)
+        zoom_label = QLabel("Zoom")
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(MIN_ZOOM, MAX_ZOOM)
+        self.zoom_slider.setValue(MIN_ZOOM)
+        self.zoom_slider.setAccessibleName("Preview zoom")
+        self.zoom_slider.setToolTip("Zoom in from the fitted view. Right-click and drag to pan.")
+        zoom_label.setBuddy(self.zoom_slider)
+        self.zoom_value = QLabel("100%")
+        self.zoom_slider.valueChanged.connect(self.change_zoom)
+        preview_controls_layout.addWidget(zoom_label)
+        preview_controls_layout.addWidget(self.zoom_slider, 1)
+        preview_controls_layout.addWidget(self.zoom_value)
+        preview_controls_layout.addWidget(self.brightness_reset)
+        self.brightness_controls.setEnabled(False)
+        workspace.addWidget(self.brightness_controls)
+        controls = QHBoxLayout()
+        choose = QPushButton("Choose Folder…")
+        choose.clicked.connect(self.choose_folder)
+        self.refresh = QPushButton("Refresh Folder")
+        self.refresh.setEnabled(False)
+        self.refresh.clicked.connect(self.refresh_folder)
+        self.footage_date = QDateEdit(QDate.currentDate())
+        self.footage_date.setCalendarPopup(True)
+        self.footage_date.setDisplayFormat("dd/MM/yyyy")
+        self.footage_date.setEnabled(False)
+        self.footage_date.dateChanged.connect(self.change_date)
+        footage_date_label = QLabel("Footage Date")
+        footage_date_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        for widget in (choose, self.refresh, footage_date_label, self.footage_date):
+            controls.addWidget(widget)
+        workspace.addLayout(controls)
+        observations = QVBoxLayout(right)
+        self.files = make_table(["", "Filename", "Size (MiB)"])
+        self.files.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.files.setColumnWidth(0, 28)
+        self.files.horizontalHeaderItem(0).setToolTip("Images with saved fish identifications")
+        self.tagged_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
+        self.files.itemSelectionChanged.connect(self.select_image)
+        observations.addWidget(self.files, 1)
+        self.tabs = QTabWidget()
+        self.current = make_table(["Position", "Name", "Scientific Name"])
+        self.catalogue = make_table(["Name", "Scientific Name"])
+        self.tabs.addTab(self.current, "Current Image")
+        self.tabs.addTab(self.catalogue, "All Species")
+        observations.addWidget(self.tabs, 1)
+        self.current.cellDoubleClicked.connect(self.edit_row)
+        self.preview.clicked.connect(self.create_identification)
+        self.preview.marker_clicked.connect(self.edit_identification)
+        self.reload_catalogue()
+        self.statusBar().showMessage("Choose a folder to begin.")
+        self.restore_folder()
+
+    def restore_folder(self) -> None:
+        """Reopen the last folder if present; preference failures leave the app usable."""
+        try:
+            folder = self.preferences.last_folder()
+            if folder is not None:
+                self.open_folder(folder)
+                image = self.preferences.last_image(folder)
+                if image in self.paths:
+                    preview_settings = self.preferences.preview_settings()
+                    self.files.selectRow(self.paths.index(image))
+                    if self.current_path == image:
+                        self.brightness_slider.setValue(preview_settings.brightness)
+                        self.zoom_slider.setValue(preview_settings.zoom)
+        except OSError as error:
+            LOGGER.warning("Cannot restore the last folder: %s", error, exc_info=True)
+            self.statusBar().showMessage("Could not read preferences. Choose a folder to begin.")
+            return
+
+    def open_folder(self, folder: Path) -> None:
+        """Display and scan a folder without selecting or modifying any image."""
+        self.folder = folder
+        self.folder_text.setText(str(folder))
+        self.refresh.setEnabled(True)
+        self.refresh_folder()
+
+    def report_error(self, message: str) -> None:
+        """Log underlying failures and display an actionable modal alert."""
+        LOGGER.exception(message)
+        QMessageBox.critical(self, "ReefTag", message)
+
+    def change_brightness(self, value: int) -> None:
+        """Adjust preview brightness and remember it for the current image."""
+        self.preview.set_brightness(value)
+        self.brightness_value.setText(f"{value:+d}" if value else "0")
+        self.save_preview_preferences()
+
+    def change_zoom(self, percentage: int) -> None:
+        """Update the preview magnification and its visible percentage."""
+        self.preview.set_zoom(percentage)
+        self.zoom_value.setText(f"{percentage}%")
+        self.save_preview_preferences()
+
+    def save_preview_preferences(self) -> None:
+        """Save the current image and controls without making preference failures fatal."""
+        if self.current_path is None:
+            return
+        try:
+            self.preferences.save_last_image(
+                self.current_path,
+                PreviewSettings(self.brightness_slider.value(), self.zoom_slider.value()),
+            )
+        except OSError as error:
+            LOGGER.warning("Cannot save preview preferences: %s", error, exc_info=True)
+            self.statusBar().showMessage(
+                "Image loaded, but preferences could not be saved for next startup."
+            )
+
+    def reset_preview(self) -> None:
+        """Restore neutral brightness, fitted zoom and a centred preview."""
+        self.brightness_slider.setValue(0)
+        self.zoom_slider.setValue(MIN_ZOOM)
+        self.preview.reset_pan()
+
+    def reload_catalogue(self) -> None:
+        """Refresh the independent shared species view."""
+        fill_table(
+            self.catalogue, [[s.common_name, s.scientific_name] for s in self.repository.species()]
+        )
+
+    def choose_folder(self) -> None:
+        """Open the native chooser, preserving state on cancellation."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose image folder", str(self.folder or Path.home())
+        )
+        if folder:
+            self.open_folder(Path(folder))
+            try:
+                self.preferences.save_last_folder(Path(folder))
+            except OSError as error:
+                LOGGER.warning("Cannot save the last folder: %s", error, exc_info=True)
+                self.statusBar().showMessage(
+                    "Folder opened, but preferences could not be saved for next startup."
+                )
+
+    def refresh_folder(self) -> None:
+        """Rescan the selected directory and reload any surviving selected image."""
+        if self.folder is None:
+            return
+        try:
+            discovered = discover_images(self.folder)
+            tagged_counts = self.repository.tagged_image_counts()
+        except (OSError, sqlite3.Error) as error:
+            self.report_error(f"Cannot refresh the folder: {error}")
+            return
+        previous = self.current_path
+        previous_settings = PreviewSettings(
+            self.brightness_slider.value(), self.zoom_slider.value()
+        )
+        self.files.blockSignals(True)
+        self.paths = [path for path, _ in discovered]
+        fill_table(self.files, [["", path.name, f"{size:.1f}"] for path, size in discovered])
+        self.update_file_indicators(tagged_counts)
+        self.files.clearSelection()
+        self.files.blockSignals(False)
+        self.clear_image()
+        if previous in self.paths:
+            self.files.selectRow(self.paths.index(previous))
+            if self.current_path == previous:
+                self.brightness_slider.setValue(previous_settings.brightness)
+                self.zoom_slider.setValue(previous_settings.zoom)
+        self.statusBar().showMessage(
+            f"{len(self.paths)} images found."
+            if self.paths
+            else "No supported images in this folder."
+        )
+
+    def update_file_indicators(self, tagged_counts: dict[str, int]) -> None:
+        """Show a compact tick and accessible tag count for each annotated image."""
+        for row, path in enumerate(self.paths):
+            count = tagged_counts.get(path.name, 0)
+            item = self.files.item(row, 0)
+            item.setIcon(self.tagged_icon if count else QIcon())
+            description = f"{count} saved fish identification{'s' if count != 1 else ''}"
+            item.setToolTip(description)
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, description)
+
+    def clear_image(self) -> None:
+        """Disable image actions and discard stale preview state."""
+        self.current_path = None
+        self.annotations = []
+        self.preview.set_image(QPixmap(), [])
+        self.brightness_controls.setEnabled(False)
+        self.current.setRowCount(0)
+        self.footage_date.setEnabled(False)
+
+    def select_image(self) -> None:
+        """Decode an image and restore persisted annotations and its own pending date."""
+        row = self.files.currentRow()
+        self.clear_image()
+        self.reset_preview()
+        if row < 0 or row >= len(self.paths):
+            return
+        path = self.paths[row]
+        try:
+            reader = QImageReader(str(path))
+            # Keep raw pixel orientation so saved coordinates match original image pixels.
+            reader.setAutoTransform(False)
+            image = reader.read()
+            if image.isNull():
+                raise ValueError(reader.errorString())
+            saved_date = self.repository.image_date(path)
+            annotations = self.repository.identifications(path)
+            self.current_path = path
+            self.annotations = annotations
+            selected_date = saved_date or self.pending_dates.setdefault(path, self.session_date)
+            self.footage_date.blockSignals(True)
+            self.footage_date.setDate(
+                QDate(selected_date.year, selected_date.month, selected_date.day)
+            )
+            self.footage_date.blockSignals(False)
+            self.footage_date.setEnabled(True)
+            self.preview.set_image(QPixmap.fromImage(image), annotations)
+            self.brightness_controls.setEnabled(True)
+            self.populate_current()
+            self.tabs.setCurrentIndex(0)
+            self.statusBar().showMessage(f"{path.name} — click a fish to identify it.")
+        except (OSError, ValueError, sqlite3.Error) as error:
+            self.clear_image()
+            self.report_error(f"Cannot load {path.name}: {error}")
+            return
+        self.save_preview_preferences()
+
+    def populate_current(self) -> None:
+        """Show numbered observations and synchronise the overlay."""
+        fill_table(
+            self.current,
+            [
+                [str(a.number), a.species.common_name, a.species.scientific_name]
+                for a in self.annotations
+            ],
+        )
+        self.preview.annotations = self.annotations
+        self.preview.update()
+
+    def change_date(self, value: QDate) -> None:
+        """Persist existing-image dates; keep unsaved-image dates only in session state."""
+        if self.current_path is None:
+            return
+        footage_date = date(value.year(), value.month(), value.day())
+        try:
+            self.repository.update_date(self.current_path, footage_date)
+            self.pending_dates[self.current_path] = footage_date
+            self.session_date = footage_date
+        except sqlite3.Error as error:
+            self.report_error(f"Cannot save the footage date: {error}")
+            self.select_image()
+
+    def create_identification(self, x: int, y: int) -> None:
+        """Open an unsaved annotation at source coordinates."""
+        self.identification_dialog(None, x, y)
+
+    def edit_row(self, row: int, column: int) -> None:
+        """Open the same editing workflow from a table row."""
+        if 0 <= row < len(self.annotations):
+            self.edit_identification(self.annotations[row].id)
+
+    def edit_identification(self, identification_id: int) -> None:
+        """Open an existing marker while retaining its number and coordinates."""
+        annotation = next((a for a in self.annotations if a.id == identification_id), None)
+        if annotation:
+            self.identification_dialog(annotation, annotation.x, annotation.y)
+
+    def identification_dialog(self, annotation: Identification | None, x: int, y: int) -> None:
+        """Commit accepted changes and refresh views; cancellation performs no writes."""
+        if self.current_path is None:
+            return
+        try:
+            dialog = SpeciesDialog(self.repository.species(), annotation, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            if dialog.deleted and annotation:
+                self.repository.delete(annotation.id)
+            elif annotation:
+                self.repository.edit(annotation.id, *dialog.names())
+            else:
+                value = self.footage_date.date()
+                footage_date = date(value.year(), value.month(), value.day())
+                self.repository.create(self.current_path, footage_date, x, y, *dialog.names())
+            self.annotations = self.repository.identifications(self.current_path)
+            self.populate_current()
+            self.reload_catalogue()
+            self.update_file_indicators(self.repository.tagged_image_counts())
+            self.statusBar().showMessage(
+                "Identification saved." if not dialog.deleted else "Identification deleted."
+            )
+        except (ValueError, sqlite3.Error) as error:
+            self.report_error(f"Cannot save the identification: {error}")

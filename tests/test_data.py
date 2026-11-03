@@ -1,0 +1,148 @@
+"""Persistence acceptance and transaction regression tests."""
+
+import sqlite3
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from reef_tag.config import database_path
+from reef_tag.db import connect
+from reef_tag.repositories import Repository
+
+DAY = date(2026, 10, 13)
+
+
+@pytest.fixture
+def repository(tmp_path: Path):
+    """Provide a fresh database with enforced foreign keys."""
+    connection = connect(tmp_path / "test.sqlite3")
+    yield Repository(connection)
+    connection.close()
+
+
+def test_numbers_species_and_deletion(repository: Repository, tmp_path: Path) -> None:
+    """Keep numbers stable and preserve shared records on deletion."""
+    first, second = tmp_path / "one.png", tmp_path / "two.png"
+    for path in (first, first, second):
+        repository.create(path, DAY, 10, 20, " Surgeonfish ", " Acanthurus leucosternon ")
+    observations = repository.identifications(first)
+    assert [a.number for a in observations] == [1, 2]
+    assert repository.identifications(second)[0].number == 1
+    assert len(repository.species()) == 1
+    repository.delete(observations[0].id)
+    repository.create(first, DAY, 30, 40, "Surgeonfish", "Acanthurus leucosternon")
+    assert [a.number for a in repository.identifications(first)] == [2, 3]
+    for observation in repository.identifications(first):
+        repository.delete(observation.id)
+    assert repository.image_date(first) == DAY
+    assert len(repository.species()) == 1
+
+
+def test_edit_is_local(repository: Repository, tmp_path: Path) -> None:
+    """Changing one annotation's species leaves other annotations unchanged."""
+    first, second = tmp_path / "a" / "frame.png", tmp_path / "b" / "other.png"
+    for path in (first, second):
+        repository.create(path, DAY, 0, 0, "A", "Alpha")
+    original = repository.identifications(first)[0]
+    repository.edit(original.id, "B", "Beta")
+    edited = repository.identifications(first)[0]
+    assert (edited.id, edited.number, edited.x, edited.y) == (original.id, 1, 0, 0)
+    assert edited.species.common_name == "B"
+    assert repository.identifications(second)[0].species.common_name == "A"
+
+
+def test_image_identity_is_filename_only(repository: Repository, tmp_path: Path) -> None:
+    """Store only the filename and reuse annotations and dates after a folder move."""
+    original = tmp_path / "original" / "frame.PNG"
+    relocated = tmp_path / "relocated" / "frame.PNG"
+    repository.create(original, DAY, 10, 20, "A", "Alpha")
+    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == "frame.PNG"
+    assert repository.identifications(relocated) == repository.identifications(original)
+    assert repository.image_date(relocated) == DAY
+    repository.update_date(relocated, date(2026, 10, 14))
+    assert repository.image_date(original) == date(2026, 10, 14)
+    repository.create(relocated, DAY, 30, 40, "A", "Alpha")
+    assert repository.connection.execute("SELECT COUNT(*) FROM IMAGE").fetchone()[0] == 1
+    assert [a.number for a in repository.identifications(original)] == [1, 2]
+
+
+def test_atomic_failure_and_foreign_keys(repository: Repository, tmp_path: Path) -> None:
+    """Roll back newly inserted parents when the final annotation insert fails."""
+    connection = repository.connection
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    connection.execute("""CREATE TRIGGER reject_annotation BEFORE INSERT ON IDENTIFICATION
+                          BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.create(tmp_path / "frame.png", DAY, 1, 2, "A", "Alpha")
+    assert repository.species() == []
+    assert connection.execute("SELECT COUNT(*) FROM IMAGE").fetchone()[0] == 0
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "INSERT INTO IDENTIFICATION (ImageId, SpeciesId, Number, X, Y) VALUES (999,999,1,0,0)"
+        )
+    connection.rollback()
+
+
+def test_duplicates_dates_and_restart(tmp_path: Path) -> None:
+    """Persist dates and reject conflicting names without partial records."""
+    database = tmp_path / "test.sqlite3"
+    connection = connect(database)
+    repository = Repository(connection)
+    path = tmp_path / "frame.png"
+    repository.update_date(path, DAY)
+    assert repository.image_date(path) is None
+    repository.create(path, DAY, 0, 0, "A", "Alpha")
+    with pytest.raises(ValueError):
+        repository.create(tmp_path / "new.png", DAY, 0, 0, "A", "Beta")
+    assert repository.image_date(tmp_path / "new.png") is None
+    with pytest.raises(ValueError):
+        repository.create(path, DAY, 0, 0, " ", "Alpha")
+    repository.update_date(path, date(2026, 10, 14))
+    connection.close()
+    connection = connect(database)
+    repository = Repository(connection)
+    assert repository.image_date(path) == date(2026, 10, 14)
+    assert len(repository.identifications(path)) == 1
+    connection.close()
+
+
+def test_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Reject absent, relative and directory database configuration."""
+    for value in ("", "relative.sqlite3", str(tmp_path), str(tmp_path / "absent" / "db")):
+        monkeypatch.setenv("REEFTAG_DB_PATH", value)
+        with pytest.raises(ValueError):
+            database_path()
+    monkeypatch.setenv("REEFTAG_DB_PATH", str(tmp_path / "db.sqlite3"))
+    assert database_path() == tmp_path / "db.sqlite3"
+
+
+def test_integer_primary_and_foreign_keys(repository: Repository, tmp_path: Path) -> None:
+    """Let SQLite allocate integer keys and use those keys for all relationships."""
+    path = tmp_path / "frame.png"
+    repository.create(path, DAY, 10, 20, "A", "Alpha")
+    repository.create(path, DAY, 30, 40, "B", "Beta")
+    connection = repository.connection
+    for table in ("IMAGE", "SPECIES", "IDENTIFICATION"):
+        columns = {row[1]: row for row in connection.execute(f"PRAGMA table_info({table})")}
+        assert columns["id"][2] == "INTEGER"
+        assert columns["id"][5] == 1
+        assert all(
+            row[0] == "integer" for row in connection.execute(f"SELECT typeof(id) FROM {table}")
+        )
+    assert all(
+        tuple(row) == ("integer", "integer")
+        for row in connection.execute(
+            "SELECT typeof(ImageId), typeof(SpeciesId) FROM IDENTIFICATION"
+        )
+    )
+    observations = repository.identifications(path)
+    assert all(isinstance(a.id, int) and isinstance(a.species.id, int) for a in observations)
+    assert len({a.id for a in observations}) == 2
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "INSERT INTO IMAGE (id, Name, Date) VALUES (?, ?, ?)",
+            ("old-guid", "invalid.png", DAY.isoformat()),
+        )
+    connection.rollback()
