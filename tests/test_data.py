@@ -178,3 +178,19 @@ def test_pending_lifecycle(tmp_path: Path) -> None:
     repository.set_further_examination(path, footage_date, False)
     assert repository.further_examination_images() == set()
     connection.close()
+
+
+def test_species_image_names(repository: Repository, tmp_path: Path) -> None:
+    """Group distinct filenames by species, excluding unknowns and removed observations."""
+    first, second = tmp_path / "one.png", tmp_path / "two.png"
+    for path in (first, first, second):
+        repository.create(path, DAY, 1, 2, "A", "Alpha")
+    repository.create(second, DAY, 1, 2, "B", "Beta")
+    repository.create_pending(tmp_path / "unknown.png", DAY, 1, 2)
+    species_a, species_b = repository.species()
+    assert repository.species_image_names() == {
+        species_a.id: {first.name, second.name},
+        species_b.id: {second.name},
+    }
+    repository.delete(repository.identifications(second)[-1].id)
+    assert repository.species_image_names() == {species_a.id: {first.name, second.name}}

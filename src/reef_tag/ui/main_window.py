@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QPointF, Qt
-from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDateEdit,
@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self.current_path: Path | None = None
         self.annotations: list[Identification] = []
         self.pending: list[PendingIdentification] = []
+        self.filtered_species: set[int] = set()
         self.pending_dates: dict[Path, date] = {}
         self.session_date = date.today()
         self.setWindowTitle(
@@ -193,7 +194,13 @@ class MainWindow(QMainWindow):
         observations.addWidget(self.files, 1)
         self.tabs = QTabWidget()
         self.current = make_table(["Position", "Name", "Scientific Name"])
-        self.catalogue = make_table(["Name", "Scientific Name"])
+        self.catalogue = make_table(["Name", "Scientific Name", ""])
+        self.catalogue.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.catalogue.setColumnWidth(2, 32)
+        self.catalogue.horizontalHeaderItem(2).setToolTip(
+            "Filter images by species; multiple filters match any selected species"
+        )
+        self.catalogue.cellClicked.connect(self.toggle_species_filter)
         self.tabs.addTab(self.current, "Current Image")
         self.tabs.addTab(self.catalogue, "All Species")
         observations.addWidget(self.tabs, 1)
@@ -270,9 +277,83 @@ class MainWindow(QMainWindow):
 
     def reload_catalogue(self) -> None:
         """Refresh the independent shared species view."""
-        fill_table(
-            self.catalogue, [[s.common_name, s.scientific_name] for s in self.repository.species()]
+        species = self.repository.species()
+        fill_table(self.catalogue, [[s.common_name, s.scientific_name, ""] for s in species])
+        for row, item in enumerate(species):
+            cell = self.catalogue.item(row, 2)
+            cell.setData(Qt.ItemDataRole.UserRole, item.id)
+            active = item.id in self.filtered_species
+            cell.setIcon(self.species_filter_icon(active))
+            description = (
+                f"Clear image filter for {item.common_name}"
+                if active
+                else f"Filter images containing {item.common_name}"
+            )
+            cell.setToolTip(description)
+            cell.setData(Qt.ItemDataRole.AccessibleTextRole, description)
+
+    def species_filter_icon(self, active: bool) -> QIcon:
+        """Draw a funnel with a distinct colour when its species filter is active.
+
+        :param active: Whether this species is included in the current filter.
+        :return: Funnel icon for the catalogue action column.
+        """
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        colour = QColor("#1684e8") if active else self.palette().text().color()
+        painter.setPen(QPen(colour, 1.5))
+        painter.setBrush(colour if active else Qt.BrushStyle.NoBrush)
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(3, 3),
+                    QPointF(17, 3),
+                    QPointF(12, 10),
+                    QPointF(12, 16),
+                    QPointF(8, 18),
+                    QPointF(8, 10),
+                ]
+            )
         )
+        painter.end()
+        return QIcon(pixmap)
+
+    def toggle_species_filter(self, row: int, column: int) -> None:
+        """Toggle a catalogue filter without persisting it between sessions.
+
+        :param row: Clicked catalogue row.
+        :param column: Clicked column; only the filter column changes filters.
+        """
+        if column != 2 or not 0 <= row < self.catalogue.rowCount():
+            return
+        species_id = self.catalogue.item(row, column).data(Qt.ItemDataRole.UserRole)
+        if species_id in self.filtered_species:
+            self.filtered_species.remove(species_id)
+        else:
+            self.filtered_species.add(species_id)
+        try:
+            self.apply_species_filters()
+            self.reload_catalogue()
+        except sqlite3.Error as error:
+            self.report_error(f"Cannot filter images: {error}")
+
+    def apply_species_filters(self) -> None:
+        """Show images matching any active species, retaining a visible selected image."""
+        species_images = self.repository.species_image_names() if self.filtered_species else {}
+        matching = set().union(*(species_images.get(key, set()) for key in self.filtered_species))
+        self.files.blockSignals(True)
+        for row, path in enumerate(self.paths):
+            hidden = bool(self.filtered_species) and path.name not in matching
+            self.files.setRowHidden(row, hidden)
+        if self.current_path in self.paths:
+            row = self.paths.index(self.current_path)
+            if self.files.isRowHidden(row):
+                self.files.clearSelection()
+                self.files.setCurrentItem(None)
+                self.clear_image()
+        self.files.blockSignals(False)
 
     def choose_folder(self) -> None:
         """Open the native chooser, preserving state on cancellation."""
@@ -318,6 +399,7 @@ class MainWindow(QMainWindow):
             if self.current_path == previous:
                 self.brightness_slider.setValue(previous_settings.brightness)
                 self.zoom_slider.setValue(previous_settings.zoom)
+        self.apply_species_filters()
         self.statusBar().showMessage(
             f"{len(self.paths)} images found."
             if self.paths
@@ -502,6 +584,7 @@ class MainWindow(QMainWindow):
             examination_images = self.repository.further_examination_images()
             for row, path in enumerate(self.paths):
                 self.update_examination_indicator(row, path.name in examination_images)
+            self.apply_species_filters()
             self.statusBar().showMessage(
                 "Identification saved." if not dialog.deleted else "Identification deleted."
             )
