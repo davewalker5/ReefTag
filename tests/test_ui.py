@@ -539,3 +539,72 @@ def test_unknown_marker_workflow(application: QApplication, tmp_path: Path, monk
     assert repository.further_examination_images() == set()
     window.close()
     connection.close()
+
+
+def test_species_filters(
+    application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Toggle combined filters, browse, refresh, and restart without retaining filters."""
+    image = QImage(40, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor("teal"))
+    for name in ("a.png", "b.png", "c.png", "unknown.png"):
+        image.save(str(tmp_path / name))
+    connection = connect(tmp_path / "db.sqlite3")
+    repository = Repository(connection)
+    for name, common, scientific in (
+        ("a.png", "A", "Alpha"),
+        ("b.png", "A", "Alpha"),
+        ("c.png", "B", "Beta"),
+    ):
+        repository.create(tmp_path / name, date.today(), 1, 2, common, scientific)
+    repository.create_pending(tmp_path / "unknown.png", date.today(), 1, 2)
+    window = MainWindow(repository)
+    window.open_folder(tmp_path)
+    window.show()
+    window.tabs.setCurrentIndex(1)
+    application.processEvents()
+    inactive = window.catalogue.item(0, 2).icon().pixmap(20, 20).toImage()
+    QTest.mouseClick(
+        window.catalogue.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=window.catalogue.visualItemRect(window.catalogue.item(0, 2)).center(),
+    )
+    assert window.filtered_species == {repository.species()[0].id}
+    assert window.catalogue.item(0, 2).icon().pixmap(20, 20).toImage() != inactive
+    assert [window.files.isRowHidden(row) for row in range(4)] == [False, False, True, True]
+    window.files.selectRow(0)
+    window.files.selectRow(1)
+    assert window.current_path == tmp_path / "b.png"
+    window.refresh_folder()
+    assert window.current_path == tmp_path / "b.png"
+    assert window.files.isRowHidden(2)
+    window.toggle_species_filter(1, 2)
+    assert not window.files.isRowHidden(2)
+    window.toggle_species_filter(0, 2)
+    assert window.current_path is None
+    assert [window.files.isRowHidden(row) for row in range(4)] == [True, True, False, True]
+    window.toggle_species_filter(1, 2)
+    assert not any(window.files.isRowHidden(row) for row in range(4))
+    window.toggle_species_filter(0, 2)
+    window.files.selectRow(0)
+    observation = repository.identifications(tmp_path / "a.png")[0]
+
+    def delete_identification(dialog: SpeciesDialog) -> int:
+        """Accept a deletion of the selected image's last matching observation."""
+        dialog.deleted = True
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(SpeciesDialog, "exec", delete_identification)
+    window.edit_identification(observation.id)
+    assert window.current_path is None
+    assert window.files.isRowHidden(0)
+    repository.delete(repository.identifications(tmp_path / "b.png")[0].id)
+    window.refresh_folder()
+    assert all(window.files.isRowHidden(row) for row in range(4))
+    assert window.filtered_species == {repository.species()[0].id}
+    window.close()
+    restarted = MainWindow(repository)
+    assert restarted.filtered_species == set()
+    assert not any(restarted.files.isRowHidden(row) for row in range(4))
+    restarted.close()
+    connection.close()

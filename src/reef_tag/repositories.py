@@ -48,6 +48,19 @@ class Repository:
             )
         )
 
+    def species_image_names(self) -> dict[int, set[str]]:
+        """Return identified filenames grouped by species ID.
+
+        :return: Species IDs mapped to unique stored image filenames.
+        """
+        images: dict[int, set[str]] = {}
+        for species_id, name in self.connection.execute(
+            "SELECT DISTINCT i.SpeciesId, m.Name FROM IDENTIFICATION i "
+            "JOIN IMAGE m ON m.id=i.ImageId"
+        ):
+            images.setdefault(species_id, set()).add(name)
+        return images
+
     def further_examination_images(self) -> set[str]:
         """Return filenames flagged for further examination, including untagged images."""
         return {
