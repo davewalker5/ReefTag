@@ -495,3 +495,47 @@ def test_further_examination_toggle(application: QApplication, tmp_path: Path) -
     assert Repository(connection).further_examination_images() == set()
     assert Repository(connection).image_date(path) == selected_date
     connection.close()
+
+
+def test_unknown_marker_workflow(application: QApplication, tmp_path: Path, monkeypatch) -> None:
+    """Create, reload, click and resolve an unknown through the dialog workflow."""
+    image = QImage(400, 200, QImage.Format.Format_RGB32)
+    image.fill(QColor("teal"))
+    path = tmp_path / "unknown.png"
+    image.save(str(path))
+    connection = connect(tmp_path / "db.sqlite3")
+    repository = Repository(connection)
+    window = MainWindow(repository)
+    window.open_folder(tmp_path)
+    window.files.selectRow(0)
+    monkeypatch.setattr(SpeciesDialog, "exec", lambda self: self.mark_unknown() or self.result())
+    window.create_identification(200, 100)
+    assert len(window.preview.pending) == 1
+    assert window.annotations == []
+    window.toggle_further_examination(0, 1)
+    assert repository.further_examination_images() == {path.name}
+    window.refresh_folder()
+    assert len(window.preview.pending) == 1
+    window.show()
+    application.processEvents()
+    window.preview.pending_clicked.disconnect(window.edit_pending)
+    spy = QSignalSpy(window.preview.pending_clicked)
+    x, y = window.preview.geometry_map().to_preview(200, 100)
+    QTest.mouseClick(window.preview, Qt.MouseButton.LeftButton, pos=QPoint(int(x), int(y)))
+    assert spy.count() == 1
+
+    def identify(dialog):
+        """Select a species for the pending marker."""
+        dialog.common.setText("Fish")
+        dialog.scientific.setText("Fish species")
+        dialog.accept()
+        return dialog.result()
+
+    monkeypatch.setattr(SpeciesDialog, "exec", identify)
+    window.edit_pending(window.pending[0].id)
+    assert window.preview.pending == []
+    assert window.annotations[0].number == 1
+    window.toggle_further_examination(0, 1)
+    assert repository.further_examination_images() == set()
+    window.close()
+    connection.close()

@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from reef_tag.files import discover_images
-from reef_tag.models import Identification
+from reef_tag.models import Identification, PendingIdentification
 from reef_tag.preferences import Preferences, PreviewSettings
 from reef_tag.repositories import Repository
 from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.paths: list[Path] = []
         self.current_path: Path | None = None
         self.annotations: list[Identification] = []
+        self.pending: list[PendingIdentification] = []
         self.pending_dates: dict[Path, date] = {}
         self.session_date = date.today()
         self.setWindowTitle(
@@ -199,6 +200,7 @@ class MainWindow(QMainWindow):
         self.current.cellDoubleClicked.connect(self.edit_row)
         self.preview.clicked.connect(self.create_identification)
         self.preview.marker_clicked.connect(self.edit_identification)
+        self.preview.pending_clicked.connect(self.edit_pending)
         self.reload_catalogue()
         self.statusBar().showMessage("Choose a folder to begin.")
         self.restore_folder()
@@ -344,6 +346,9 @@ class MainWindow(QMainWindow):
         footage_date = self.pending_dates.get(path, self.session_date)
         try:
             self.repository.set_further_examination(path, footage_date, enabled)
+        except ValueError as error:
+            self.statusBar().showMessage(str(error))
+            return
         except sqlite3.Error as error:
             self.report_error(f"Cannot save the further examination flag: {error}")
             return
@@ -363,6 +368,8 @@ class MainWindow(QMainWindow):
         """Disable image actions and discard stale preview state."""
         self.current_path = None
         self.annotations = []
+        self.pending = []
+        self.preview.pending = []
         self.preview.set_image(QPixmap(), [])
         self.brightness_controls.setEnabled(False)
         self.current.setRowCount(0)
@@ -385,6 +392,7 @@ class MainWindow(QMainWindow):
                 raise ValueError(reader.errorString())
             saved_date = self.repository.image_date(path)
             annotations = self.repository.identifications(path)
+            self.pending = self.repository.pending_identifications(path)
             self.current_path = path
             self.annotations = annotations
             selected_date = saved_date or self.pending_dates.setdefault(path, self.session_date)
@@ -414,6 +422,7 @@ class MainWindow(QMainWindow):
                 for a in self.annotations
             ],
         )
+        self.preview.pending = self.pending
         self.preview.annotations = self.annotations
         self.preview.update()
 
@@ -445,7 +454,15 @@ class MainWindow(QMainWindow):
         if annotation:
             self.identification_dialog(annotation, annotation.x, annotation.y)
 
-    def identification_dialog(self, annotation: Identification | None, x: int, y: int) -> None:
+    def edit_pending(self, pending_id: int) -> None:
+        """Open an unknown marker without confusing its ID with identified observations."""
+        annotation = next((item for item in self.pending if item.id == pending_id), None)
+        if annotation:
+            self.identification_dialog(annotation, annotation.x, annotation.y)
+
+    def identification_dialog(
+        self, annotation: Identification | PendingIdentification | None, x: int, y: int
+    ) -> None:
         """Commit accepted changes and refresh views; cancellation performs no writes."""
         if self.current_path is None:
             return
@@ -453,18 +470,38 @@ class MainWindow(QMainWindow):
             dialog = SpeciesDialog(self.repository.species(), annotation, self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            if dialog.deleted and annotation:
+            value = self.footage_date.date()
+            footage_date = date(value.year(), value.month(), value.day())
+            if isinstance(annotation, PendingIdentification):
+                if dialog.deleted:
+                    self.repository.delete_pending(annotation.id)
+                elif not dialog.unknown:
+                    self.repository.create(
+                        self.current_path,
+                        footage_date,
+                        x,
+                        y,
+                        *dialog.names(),
+                        pending_id=annotation.id,
+                    )
+            elif dialog.deleted and annotation:
                 self.repository.delete(annotation.id)
+            elif getattr(dialog, "unknown", False):
+                self.repository.create_pending(self.current_path, footage_date, x, y)
             elif annotation:
                 self.repository.edit(annotation.id, *dialog.names())
             else:
                 value = self.footage_date.date()
                 footage_date = date(value.year(), value.month(), value.day())
                 self.repository.create(self.current_path, footage_date, x, y, *dialog.names())
+            self.pending = self.repository.pending_identifications(self.current_path)
             self.annotations = self.repository.identifications(self.current_path)
             self.populate_current()
             self.reload_catalogue()
             self.update_file_indicators(self.repository.tagged_image_counts())
+            examination_images = self.repository.further_examination_images()
+            for row, path in enumerate(self.paths):
+                self.update_examination_indicator(row, path.name in examination_images)
             self.statusBar().showMessage(
                 "Identification saved." if not dialog.deleted else "Identification deleted."
             )
