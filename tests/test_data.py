@@ -146,3 +146,35 @@ def test_integer_primary_and_foreign_keys(repository: Repository, tmp_path: Path
             ("old-guid", "invalid.png", DAY.isoformat()),
         )
     connection.rollback()
+
+
+def test_pending_lifecycle(tmp_path: Path) -> None:
+    """Unknowns persist, require examination and convert atomically without consuming numbers."""
+    from reef_tag.db import connect
+
+    connection = connect(tmp_path / "unknown.sqlite3")
+    repository = Repository(connection)
+    path = tmp_path / "unknown.png"
+    footage_date = date(2026, 10, 13)
+    repository.create_pending(path, footage_date, 12, 34)
+    repository.create_pending(path, footage_date, 56, 78)
+    pending = repository.pending_identifications(path)
+    assert [(item.x, item.y) for item in pending] == [(12, 34), (56, 78)]
+    assert repository.further_examination_images() == {path.name}
+    with pytest.raises(ValueError, match="Resolve all unknown"):
+        repository.set_further_examination(path, footage_date, False)
+    with pytest.raises(ValueError):
+        repository.create(path, footage_date, 0, 0, "", "", pending_id=pending[0].id)
+    assert repository.pending_identifications(path) == pending
+    repository.create(path, footage_date, 0, 0, "Fish", "Fish species", pending_id=pending[0].id)
+    identified = repository.identifications(path)[0]
+    assert (identified.number, identified.x, identified.y) == (1, 12, 34)
+    connection.close()
+    connection = connect(tmp_path / "unknown.sqlite3")
+    repository = Repository(connection)
+    assert repository.pending_identifications(path) == pending[1:]
+    repository.delete_pending(pending[1].id)
+    assert repository.further_examination_images() == {path.name}
+    repository.set_further_examination(path, footage_date, False)
+    assert repository.further_examination_images() == set()
+    connection.close()

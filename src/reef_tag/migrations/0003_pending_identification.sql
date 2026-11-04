@@ -1,0 +1,8 @@
+-- depends: 0002_further_examination
+CREATE TABLE PENDING_IDENTIFICATION (
+    id INTEGER PRIMARY KEY,
+    ImageId INTEGER NOT NULL REFERENCES IMAGE(id),
+    X INTEGER NOT NULL CHECK (X >= 0),
+    Y INTEGER NOT NULL CHECK (Y >= 0)
+);
+CREATE INDEX pending_identification_image ON PENDING_IDENTIFICATION(ImageId);

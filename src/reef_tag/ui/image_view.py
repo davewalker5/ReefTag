@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QPix
 from PySide6.QtWidgets import QWidget
 
 from reef_tag.image_geometry import ImageGeometry
-from reef_tag.models import Identification
+from reef_tag.models import Identification, PendingIdentification
 
 HIT_RADIUS = 12
 MIN_BRIGHTNESS = -100
@@ -20,6 +20,7 @@ class ImageView(QWidget):
     clicked = Signal(int, int)
     # Python objects preserve SQLite 64-bit IDs without Qt's 32-bit int conversion.
     marker_clicked = Signal(object)
+    pending_clicked = Signal(object)
 
     def __init__(self) -> None:
         """Initialise a neutral, inactive preview."""
@@ -31,6 +32,7 @@ class ImageView(QWidget):
         self.pan_y = 0.0
         self._drag_position: QPointF | None = None
         self.annotations: list[Identification] = []
+        self.pending: list[PendingIdentification] = []
         self.setMinimumSize(300, 250)
 
     def set_image(self, pixmap: QPixmap, annotations: list[Identification]) -> None:
@@ -140,6 +142,18 @@ class ImageView(QWidget):
             painter.setPen(QColor("#ffe34d"))
             painter.drawText(QPointF(label_x, label_y), text)
 
+        for annotation in self.pending:
+            x, y = mapping.to_preview(annotation.x, annotation.y)
+            if not (0 <= x < self.width() and 0 <= y < self.height()):
+                continue
+            # Centre the glyph on its saved point, matching the marker hit target.
+            rect = QRectF(x - HIT_RADIUS, y - HIT_RADIUS, HIT_RADIUS * 2, HIT_RADIUS * 2)
+            painter.setPen(QColor("black"))
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                painter.drawText(rect.translated(dx, dy), Qt.AlignmentFlag.AlignCenter, "?")
+            painter.setPen(QColor("red"))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "?")
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Edit the nearest marker within tolerance, otherwise emit a source click."""
         mapping = self.geometry_map()
@@ -161,9 +175,16 @@ class ImageView(QWidget):
             px, py = mapping.to_preview(annotation.x, annotation.y)
             distance = (px - x) ** 2 + (py - y) ** 2
             if distance <= HIT_RADIUS**2:
-                candidates.append((distance, annotation.number, annotation.id))
+                candidates.append((distance, 0, annotation.id))
+        for annotation in self.pending:
+            px, py = mapping.to_preview(annotation.x, annotation.y)
+            distance = (px - x) ** 2 + (py - y) ** 2
+            if distance <= HIT_RADIUS**2:
+                candidates.append((distance, 1, annotation.id))
         if candidates:
-            self.marker_clicked.emit(min(candidates)[2])
+            _, pending, marker_id = min(candidates)
+            signal = self.pending_clicked if pending else self.marker_clicked
+            signal.emit(marker_id)
             return
         self.clicked.emit(*source)
 

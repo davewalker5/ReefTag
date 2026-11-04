@@ -21,3 +21,12 @@ class Identification:
     x: int
     y: int
     species: Species
+
+
+@dataclass(frozen=True)
+class PendingIdentification:
+    """A fish awaiting identification at original-image pixel coordinates."""
+
+    id: int
+    x: int
+    y: int

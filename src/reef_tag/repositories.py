@@ -4,7 +4,7 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from reef_tag.models import Identification, Species
+from reef_tag.models import Identification, PendingIdentification, Species
 
 
 def image_identity(path: Path) -> str:
@@ -58,6 +58,9 @@ class Repository:
     def set_further_examination(self, path: Path, footage_date: date, enabled: bool) -> None:
         """Save the flag independently of identifications, retaining existing image data."""
         with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if not enabled and self.pending_identifications(path):
+                raise ValueError("Resolve all unknown markers before clearing further examination.")
             self.connection.execute(
                 "INSERT INTO IMAGE (Name, Date, FurtherExamination) VALUES (?, ?, ?) "
                 "ON CONFLICT(Name) DO UPDATE SET FurtherExamination=excluded.FurtherExamination",
@@ -109,14 +112,43 @@ class Repository:
         return cursor.lastrowid
 
     def create(
-        self, path: Path, footage_date: date, x: int, y: int, common_name: str, scientific_name: str
+        self,
+        path: Path,
+        footage_date: date,
+        x: int,
+        y: int,
+        common_name: str,
+        scientific_name: str,
+        *,
+        pending_id: int | None = None,
     ) -> None:
-        """Atomically save the image, species and a max-plus-one numbered annotation."""
+        """Atomically save an identification, optionally replacing an unknown marker.
+
+        :param path: Photograph containing the observation.
+        :param footage_date: Date used for a newly recorded photograph.
+        :param x: Original horizontal pixel coordinate for a new identification.
+        :param y: Original vertical pixel coordinate for a new identification.
+        :param common_name: Selected species common name.
+        :param scientific_name: Selected species scientific name.
+        :param pending_id: Unknown marker to replace, using its saved coordinates.
+        :raises ValueError: If coordinates, species names or the pending marker are invalid.
+        """
         if not isinstance(x, int) or not isinstance(y, int) or x < 0 or y < 0:
             raise ValueError("Coordinates must be non-negative integer pixels.")
         with self.connection:
             # Acquire the write lock before reading numbering or catalogue state.
             self.connection.execute("BEGIN IMMEDIATE")
+            if pending_id is not None:
+                pending = next(
+                    (item for item in self.pending_identifications(path) if item.id == pending_id),
+                    None,
+                )
+                if pending is None:
+                    raise ValueError("This unknown marker no longer exists. Refresh the image.")
+                x, y = pending.x, pending.y
+                self.connection.execute(
+                    "DELETE FROM PENDING_IDENTIFICATION WHERE id=?", (pending_id,)
+                )
             species_id = self._resolve_species(common_name, scientific_name)
             identity = image_identity(path)
             row = self.connection.execute(
@@ -157,3 +189,49 @@ class Repository:
         """Delete only an observation, retaining its parent and catalogue entry."""
         with self.connection:
             self.connection.execute("DELETE FROM IDENTIFICATION WHERE id=?", (identification_id,))
+
+    def pending_identifications(self, path: Path) -> list[PendingIdentification]:
+        """Return unknown markers for a filename in stable creation order.
+
+        :param path: Photograph whose markers should be loaded.
+        :return: Saved markers in original-image pixels.
+        """
+        return [
+            PendingIdentification(*row)
+            for row in self.connection.execute(
+                "SELECT p.id, p.X, p.Y FROM PENDING_IDENTIFICATION p "
+                "JOIN IMAGE m ON m.id=p.ImageId WHERE m.Name=? ORDER BY p.id",
+                (image_identity(path),),
+            )
+        ]
+
+    def create_pending(self, path: Path, footage_date: date, x: int, y: int) -> None:
+        """Save an unknown marker and flag its photograph atomically.
+
+        :param path: Photograph containing the fish.
+        :param footage_date: Date used only for a newly recorded photograph.
+        :param x: Non-negative horizontal original-image pixel coordinate.
+        :param y: Non-negative vertical original-image pixel coordinate.
+        :raises ValueError: If coordinates are not non-negative integers.
+        """
+        if not isinstance(x, int) or not isinstance(y, int) or x < 0 or y < 0:
+            raise ValueError("Coordinates must be non-negative integer pixels.")
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO IMAGE (Name, Date, FurtherExamination) VALUES (?, ?, 1) "
+                "ON CONFLICT(Name) DO UPDATE SET FurtherExamination=1",
+                (image_identity(path), footage_date.isoformat()),
+            )
+            self.connection.execute(
+                "INSERT INTO PENDING_IDENTIFICATION (ImageId, X, Y) "
+                "SELECT id, ?, ? FROM IMAGE WHERE Name=?",
+                (x, y, image_identity(path)),
+            )
+
+    def delete_pending(self, pending_id: int) -> None:
+        """Remove an unknown marker, retaining its image and examination flag.
+
+        :param pending_id: Primary key of the marker to remove.
+        """
+        with self.connection:
+            self.connection.execute("DELETE FROM PENDING_IDENTIFICATION WHERE id=?", (pending_id,))
