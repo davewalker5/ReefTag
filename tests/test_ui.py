@@ -447,3 +447,51 @@ def test_preview_settings_restore_and_reset_for_new_image(
     assert missing.preview.zoom == 1
     missing.close()
     connection.close()
+
+
+def test_further_examination_toggle(application: QApplication, tmp_path: Path) -> None:
+    """Click flags independently of identifications and retain unflagged empty records."""
+    image = QImage(400, 200, QImage.Format.Format_RGB32)
+    image.fill(QColor("teal"))
+    path = tmp_path / "frame.png"
+    image.save(str(path))
+    database = tmp_path / "db.sqlite3"
+    connection = connect(database)
+    repository = Repository(connection)
+    window = MainWindow(repository)
+    window.open_folder(tmp_path)
+    window.show()
+    application.processEvents()
+
+    def click_flag() -> None:
+        """Click the second narrow column as a user would."""
+        QTest.mouseClick(
+            window.files.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=window.files.visualItemRect(window.files.item(0, 1)).center(),
+        )
+
+    window.files.selectRow(0)
+    window.footage_date.setDate(window.footage_date.date().addDays(-10))
+    selected_date = window.footage_date.date().toPython()
+    click_flag()
+    assert not window.files.item(0, 1).icon().isNull()
+    assert window.files.item(0, 0).icon().isNull()
+    assert repository.identifications(path) == []
+    assert repository.image_date(path) == selected_date
+    window.refresh_folder()
+    assert not window.files.item(0, 1).icon().isNull()
+    repository.create(path, date.today(), 1, 2, "A", "Alpha")
+    window.refresh_folder()
+    assert not window.files.item(0, 0).icon().isNull()
+    assert not window.files.item(0, 1).icon().isNull()
+    repository.delete(repository.identifications(path)[0].id)
+    click_flag()
+    assert window.files.item(0, 1).icon().isNull()
+    assert repository.image_date(path) == selected_date
+    window.close()
+    connection.close()
+    connection = connect(database)
+    assert Repository(connection).further_examination_images() == set()
+    assert Repository(connection).image_date(path) == selected_date
+    connection.close()

@@ -2,6 +2,7 @@
 [![Releases](https://img.shields.io/github/v/release/davewalker5/ReefTag.svg?include_prereleases)](https://github.com/davewalker5/ReefTag/releases)
 [![License](https://img.shields.io/badge/License-mit-blue.svg)](https://github.com/davewalker5/ReefTag/blob/main/LICENSE)
 [![Language](https://img.shields.io/badge/language-python-blue.svg)](https://www.python.org)
+[![Language](https://img.shields.io/badge/database-SQLite-blue.svg)](https://github.com/davewalker5/ReefTag/)
 [![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/davewalker5/ReefTag)](https://github.com/davewalker5/ReefTag/)
 
 ## Overview

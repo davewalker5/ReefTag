@@ -1,0 +1,1 @@
+ALTER TABLE IMAGE DROP COLUMN FurtherExamination;
