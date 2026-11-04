@@ -48,6 +48,22 @@ class Repository:
             )
         )
 
+    def further_examination_images(self) -> set[str]:
+        """Return filenames flagged for further examination, including untagged images."""
+        return {
+            row[0]
+            for row in self.connection.execute("SELECT Name FROM IMAGE WHERE FurtherExamination=1")
+        }
+
+    def set_further_examination(self, path: Path, footage_date: date, enabled: bool) -> None:
+        """Save the flag independently of identifications, retaining existing image data."""
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO IMAGE (Name, Date, FurtherExamination) VALUES (?, ?, ?) "
+                "ON CONFLICT(Name) DO UPDATE SET FurtherExamination=excluded.FurtherExamination",
+                (image_identity(path), footage_date.isoformat(), int(enabled)),
+            )
+
     def update_date(self, path: Path, footage_date: date) -> None:
         """Update an existing image only; never create an empty image record."""
         with self.connection:

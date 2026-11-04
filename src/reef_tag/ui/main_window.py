@@ -5,8 +5,8 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QIcon, QImageReader, QPixmap
+from PySide6.QtCore import QDate, QPointF, Qt
+from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDateEdit,
@@ -168,10 +168,25 @@ class MainWindow(QMainWindow):
             controls.addWidget(widget)
         workspace.addLayout(controls)
         observations = QVBoxLayout(right)
-        self.files = make_table(["", "Filename", "Size (MiB)"])
+        self.files = make_table(["", "", "Filename", "Size (MiB)"])
         self.files.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.files.setColumnWidth(0, 28)
         self.files.horizontalHeaderItem(0).setToolTip("Images with saved fish identifications")
+        self.files.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.files.setColumnWidth(1, 28)
+        self.files.horizontalHeaderItem(1).setToolTip("Click to toggle further examination")
+        asterisk = QPixmap(20, 20)
+        asterisk.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(asterisk)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("red"), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        # Fill the icon area instead of inheriting the small asterisk glyph's font margins.
+        painter.drawLine(QPointF(10, 2), QPointF(10, 18))
+        painter.drawLine(QPointF(3, 6), QPointF(17, 14))
+        painter.drawLine(QPointF(3, 14), QPointF(17, 6))
+        painter.end()
+        self.examination_icon = QIcon(asterisk)
+        self.files.cellClicked.connect(self.toggle_further_examination)
         self.tagged_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
         self.files.itemSelectionChanged.connect(self.select_image)
         observations.addWidget(self.files, 1)
@@ -279,6 +294,7 @@ class MainWindow(QMainWindow):
         try:
             discovered = discover_images(self.folder)
             tagged_counts = self.repository.tagged_image_counts()
+            examination_images = self.repository.further_examination_images()
         except (OSError, sqlite3.Error) as error:
             self.report_error(f"Cannot refresh the folder: {error}")
             return
@@ -288,8 +304,10 @@ class MainWindow(QMainWindow):
         )
         self.files.blockSignals(True)
         self.paths = [path for path, _ in discovered]
-        fill_table(self.files, [["", path.name, f"{size:.1f}"] for path, size in discovered])
+        fill_table(self.files, [["", "", path.name, f"{size:.1f}"] for path, size in discovered])
         self.update_file_indicators(tagged_counts)
+        for row, path in enumerate(self.paths):
+            self.update_examination_indicator(row, path.name in examination_images)
         self.files.clearSelection()
         self.files.blockSignals(False)
         self.clear_image()
@@ -303,6 +321,33 @@ class MainWindow(QMainWindow):
             if self.paths
             else "No supported images in this folder."
         )
+
+    def update_examination_indicator(self, row: int, enabled: bool) -> None:
+        """Show a red asterisk and an accessible description of the saved flag."""
+        item = self.files.item(row, 1)
+        item.setIcon(self.examination_icon if enabled else QIcon())
+        item.setData(Qt.ItemDataRole.UserRole, enabled)
+        description = (
+            "Needs further examination; click to clear"
+            if enabled
+            else "Click to mark for further examination"
+        )
+        item.setToolTip(description)
+        item.setData(Qt.ItemDataRole.AccessibleTextRole, description)
+
+    def toggle_further_examination(self, row: int, column: int) -> None:
+        """Persist a clicked image's flag before changing its visible indicator."""
+        if column != 1 or not 0 <= row < len(self.paths):
+            return
+        path = self.paths[row]
+        enabled = not self.files.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        footage_date = self.pending_dates.get(path, self.session_date)
+        try:
+            self.repository.set_further_examination(path, footage_date, enabled)
+        except sqlite3.Error as error:
+            self.report_error(f"Cannot save the further examination flag: {error}")
+            return
+        self.update_examination_indicator(row, enabled)
 
     def update_file_indicators(self, tagged_counts: dict[str, int]) -> None:
         """Show a compact tick and accessible tag count for each annotated image."""
