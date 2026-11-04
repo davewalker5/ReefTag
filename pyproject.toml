@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reef-tag"
-version = "1.3.0"
+version = "1.4.0"
 description = "A desktop tool for identifying, annotating and cataloguing marine species in underwater imagery."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -28,6 +28,7 @@ select = ["E", "F", "I", "UP"]
 
 [project.scripts]
 reef-tag = "reef_tag.__main__:main"
+reef-tag-transfer = "reef_tag.nature_recorder:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
