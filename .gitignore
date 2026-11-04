@@ -145,4 +145,5 @@ proto/
 
 # Browser development dependencies
 node_modules/
-data/reeftag.db
+data/*.db
+export/
