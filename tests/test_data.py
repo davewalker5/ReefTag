@@ -79,7 +79,9 @@ def test_relative_image_path_is_stored_as_absolute(
     repository.create_pending(relative, DAY, 10, 20)
     absolute = tmp_path / relative
     assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == str(absolute)
-    assert repository.pending_identifications(absolute) == repository.pending_identifications(relative)
+    assert repository.pending_identifications(absolute) == repository.pending_identifications(
+        relative
+    )
     assert repository.further_examination_images() == {str(absolute)}
 
 
@@ -107,7 +109,8 @@ def test_duplicates_dates_and_restart(tmp_path: Path) -> None:
     repository = Repository(connection)
     path = tmp_path / "frame.png"
     repository.update_date(path, DAY)
-    assert repository.image_date(path) is None
+    assert repository.image_date(path) == DAY
+    assert repository.identifications(path) == []
     repository.create(path, DAY, 0, 0, "A", "Alpha")
     with pytest.raises(ValueError):
         repository.create(tmp_path / "new.png", DAY, 0, 0, "A", "Beta")

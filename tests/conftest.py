@@ -13,3 +13,11 @@ def isolated_preferences(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(
         preferences, "preferences_path", lambda: tmp_path / "settings/preferences.ini"
     )
+
+
+@pytest.fixture(autouse=True)
+def accept_folder_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply a date for folder prompts without blocking unattended UI tests."""
+    from reef_tag.ui.main_window import MainWindow
+
+    monkeypatch.setattr(MainWindow, "prompt_default_date", lambda self, folder, initial: initial)

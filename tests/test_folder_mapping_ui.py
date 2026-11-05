@@ -449,3 +449,25 @@ def test_file_removed_after_listing_is_reported(
     assert window.current_path is None
     assert len(repository.identifications(path)) == 1
     window.close()
+
+
+def test_mapping_moves_folder_default(
+    application: QApplication, repository: Repository, tmp_path: Path
+) -> None:
+    """A committed folder recovery also moves its saved recording default."""
+    from reef_tag.preferences import Preferences
+
+    original = tmp_path / "missing"
+    add_image(repository, original)
+    replacement = destination(tmp_path, "replacement")
+    preferences = Preferences(tmp_path / "preferences.ini")
+    preferences.save_folder_date(original, DAY)
+    dialog = FolderMappingDialog(
+        repository, discover_missing_folders(repository).candidates, preferences=preferences
+    )
+    dialog.replacement.setText(str(replacement))
+    dialog.confirm_folder()
+    assert dialog.changed
+    assert preferences.folder_date(original) is None
+    assert preferences.folder_date(replacement) == DAY
+    dialog.close()

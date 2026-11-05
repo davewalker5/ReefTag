@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDateEdit,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -84,8 +85,7 @@ class MainWindow(QMainWindow):
         self.annotations: list[Identification] = []
         self.pending: list[PendingIdentification] = []
         self.filtered_species: set[int] = set()
-        self.pending_dates: dict[Path, date] = {}
-        self.session_date = date.today()
+        self.folder_default_date: date | None = None
         self.setWindowTitle(
             "ReefTag — Identify, annotate and catalogue fish in underwater photographs"
         )
@@ -94,6 +94,9 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("Tools")
         check_paths = tools_menu.addAction("Check Image Paths")
         check_paths.triggered.connect(self.check_image_paths)
+        self.set_default_date_action = tools_menu.addAction("Set Default Date")
+        self.set_default_date_action.setEnabled(False)
+        self.set_default_date_action.triggered.connect(self.set_default_date)
         splitter = QSplitter()
         self.setCentralWidget(splitter)
         left, right = QWidget(), QWidget()
@@ -166,6 +169,9 @@ class MainWindow(QMainWindow):
         self.footage_date = QDateEdit(QDate.currentDate())
         self.footage_date.setCalendarPopup(True)
         self.footage_date.setDisplayFormat("dd/MM/yyyy")
+        self.footage_date.setMinimumDate(QDate(1, 1, 1))
+        self.footage_date.setSpecialValueText(" ")
+        self.footage_date.setDate(self.footage_date.minimumDate())
         self.footage_date.setEnabled(False)
         self.footage_date.dateChanged.connect(self.change_date)
         footage_date_label = QLabel("Footage Date")
@@ -218,7 +224,7 @@ class MainWindow(QMainWindow):
 
     def check_image_paths(self) -> None:
         """Repeat folder recovery and refresh displayed annotations after a confirmed mapping."""
-        if not check_image_paths(self.repository, self, manual=True):
+        if not check_image_paths(self.repository, self, manual=True, preferences=self.preferences):
             return
         if self.folder is not None and self.folder.is_dir():
             self.refresh_folder()
@@ -248,10 +254,76 @@ class MainWindow(QMainWindow):
 
     def open_folder(self, folder: Path) -> None:
         """Display and scan a folder without selecting or modifying any image."""
+        try:
+            default_date = self.preferences.folder_date(folder)
+            if default_date is None:
+                default_date = self.prompt_default_date(folder, date.today())
+                if default_date is None:
+                    return
+                self.preferences.save_folder_date(folder, default_date)
+        except OSError as error:
+            self.report_error(f"Cannot save or read the folder default date: {error}")
+            return
+        self.folder_default_date = default_date
+        self.set_default_date_action.setEnabled(True)
         self.folder = folder
         self.folder_text.setText(str(folder))
         self.refresh.setEnabled(True)
         self.refresh_folder()
+
+    def prompt_default_date(self, folder: Path, initial: date) -> date | None:
+        """Ask for a folder default; cancellation leaves the selected folder unchanged."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Default Date")
+        layout = QVBoxLayout(dialog)
+        label = QLabel(f"Default footage date for {folder}")
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        picker = QDateEdit(QDate(initial.year, initial.month, initial.day))
+        picker.setCalendarPopup(True)
+        picker.setDisplayFormat("dd/MM/yyyy")
+        layout.addWidget(picker)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return picker.date().toPython()
+
+    def set_default_date(self) -> None:
+        """Change the folder default without rewriting recorded image dates."""
+        if self.folder is None:
+            return
+        selected = self.prompt_default_date(self.folder, self.folder_default_date or date.today())
+        if selected is None:
+            return
+        try:
+            self.preferences.save_folder_date(self.folder, selected)
+        except OSError as error:
+            self.report_error(f"Cannot save the folder default date: {error}")
+            return
+        self.folder_default_date = selected
+        if self.current_path is None:
+            self.show_footage_date(selected)
+        else:
+            try:
+                self.show_footage_date(self.repository.image_date(self.current_path) or selected)
+            except sqlite3.Error as error:
+                self.report_error(f"Cannot read the image date: {error}")
+
+    def show_footage_date(self, value: date | None) -> None:
+        """Display a date or an empty field without triggering a database write."""
+        self.footage_date.blockSignals(True)
+        self.footage_date.setDate(
+            QDate(value.year, value.month, value.day)
+            if value is not None
+            else self.footage_date.minimumDate()
+        )
+        self.footage_date.blockSignals(False)
 
     def report_error(self, message: str) -> None:
         """Log underlying failures and display an actionable modal alert."""
@@ -378,6 +450,8 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self.open_folder(Path(folder))
+            if self.folder != Path(folder):
+                return
             try:
                 self.preferences.save_last_folder(Path(folder))
             except OSError as error:
@@ -441,7 +515,7 @@ class MainWindow(QMainWindow):
             return
         path = self.paths[row]
         enabled = not self.files.item(row, 1).data(Qt.ItemDataRole.UserRole)
-        footage_date = self.pending_dates.get(path, self.session_date)
+        footage_date = self.folder_default_date or date.today()
         try:
             self.repository.set_further_examination(path, footage_date, enabled)
         except ValueError as error:
@@ -472,9 +546,10 @@ class MainWindow(QMainWindow):
         self.brightness_controls.setEnabled(False)
         self.current.setRowCount(0)
         self.footage_date.setEnabled(False)
+        self.show_footage_date(self.folder_default_date)
 
     def select_image(self) -> None:
-        """Decode an image and restore persisted annotations and its own pending date."""
+        """Decode an image and show its recorded date or the selected folder default."""
         row = self.files.currentRow()
         self.clear_image()
         self.reset_preview()
@@ -493,12 +568,7 @@ class MainWindow(QMainWindow):
             self.pending = self.repository.pending_identifications(path)
             self.current_path = path
             self.annotations = annotations
-            selected_date = saved_date or self.pending_dates.setdefault(path, self.session_date)
-            self.footage_date.blockSignals(True)
-            self.footage_date.setDate(
-                QDate(selected_date.year, selected_date.month, selected_date.day)
-            )
-            self.footage_date.blockSignals(False)
+            self.show_footage_date(saved_date or self.folder_default_date)
             self.footage_date.setEnabled(True)
             self.preview.set_image(QPixmap.fromImage(image), annotations)
             self.brightness_controls.setEnabled(True)
@@ -525,14 +595,12 @@ class MainWindow(QMainWindow):
         self.preview.update()
 
     def change_date(self, value: QDate) -> None:
-        """Persist existing-image dates; keep unsaved-image dates only in session state."""
+        """Persist date edits immediately, including images without identifications."""
         if self.current_path is None:
             return
         footage_date = date(value.year(), value.month(), value.day())
         try:
             self.repository.update_date(self.current_path, footage_date)
-            self.pending_dates[self.current_path] = footage_date
-            self.session_date = footage_date
         except sqlite3.Error as error:
             self.report_error(f"Cannot save the footage date: {error}")
             self.select_image()

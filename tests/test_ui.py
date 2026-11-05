@@ -36,8 +36,7 @@ def test_workspace(application: QApplication, tmp_path: Path) -> None:
     repository.create(first, date(2026, 10, 13), 200, 100, "A", "Alpha")
     window = MainWindow(repository)
     window.show()
-    window.folder = tmp_path
-    window.refresh_folder()
+    window.open_folder(tmp_path)
     window.files.selectRow(0)
     application.processEvents()
     assert window.current.rowCount() == 1
@@ -60,7 +59,7 @@ def test_workspace(application: QApplication, tmp_path: Path) -> None:
     window.files.selectRow(0)
     window.files.selectRow(1)
     assert window.footage_date.date() == pending
-    assert repository.image_date(second) is None
+    assert repository.image_date(second) == pending.toPython()
     dialog = SpeciesDialog(repository.species(), None, window)
     dialog.common.setText("Unsaved")
     dialog.scientific.setText("Unsaved species")
@@ -85,8 +84,7 @@ def test_dialog_workflow(
     connection = connect(tmp_path / "db.sqlite3")
     repository = Repository(connection)
     window = MainWindow(repository)
-    window.folder = tmp_path
-    window.refresh_folder()
+    window.open_folder(tmp_path)
     window.files.selectRow(0)
 
     def accept_new(dialog: SpeciesDialog) -> int:
@@ -155,8 +153,7 @@ def test_invalid_image_is_recoverable(
     window = MainWindow(repository)
     failures = []
     monkeypatch.setattr(window, "report_error", failures.append)
-    window.folder = tmp_path
-    window.refresh_folder()
+    window.open_folder(tmp_path)
     window.files.selectRow(0)
     assert failures and "Cannot load broken.PNG" in failures[0]
     assert window.current_path is None
@@ -182,8 +179,7 @@ def test_preview_brightness(application: QApplication, tmp_path: Path) -> None:
     window = MainWindow(repository)
     assert not window.brightness_controls.isEnabled()
     assert window.brightness_slider.value() == 0
-    window.folder = tmp_path
-    window.refresh_folder()
+    window.open_folder(tmp_path)
     window.files.selectRow(0)
     window.show()
     application.processEvents()
@@ -267,8 +263,7 @@ def test_zoom_right_drag_and_reset(application: QApplication, tmp_path: Path) ->
     repository = Repository(connection)
     repository.create(path, date(2026, 10, 13), 200, 100, "A", "Alpha")
     window = MainWindow(repository)
-    window.folder = tmp_path
-    window.refresh_folder()
+    window.open_folder(tmp_path)
     window.files.selectRow(0)
     window.show()
     application.processEvents()
@@ -652,3 +647,96 @@ def test_preview_scrollbars(application: QApplication) -> None:
     view.set_image(QPixmap(), [])
     assert horizontal.maximum() == vertical.maximum() == 0
     view.close()
+
+
+def test_folder_default_dates(
+    application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use folder defaults until an image date is saved; never alter other images."""
+    from reef_tag.preferences import Preferences
+
+    connection = connect(tmp_path / "dates.sqlite3")
+    repository = Repository(connection)
+    preferences = Preferences(tmp_path / "preferences.ini")
+    folder = tmp_path / "stills"
+    folder.mkdir()
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor("teal"))
+    for name in ("a.png", "b.png"):
+        image.save(str(folder / name))
+    window = MainWindow(repository, preferences)
+    assert window.footage_date.text().strip() == ""
+    assert not window.footage_date.isEnabled()
+    assert not window.set_default_date_action.isEnabled()
+    first, second = date(2026, 10, 13), date(2026, 10, 15)
+    prompts = []
+
+    def choose_default(self, selected_folder, initial):
+        """Record prompts and return the chosen date."""
+        prompts.append(selected_folder)
+        return first
+
+    monkeypatch.setattr(MainWindow, "prompt_default_date", choose_default)
+    window.open_folder(folder)
+    assert prompts == [folder]
+    assert preferences.folder_date(folder) == first
+    assert window.footage_date.date().toPython() == first
+    assert not window.footage_date.isEnabled()
+    window.files.selectRow(0)
+    assert repository.image_date(folder / "a.png") is None
+    window.footage_date.setDate(window.footage_date.date().addDays(1))
+    assert repository.image_date(folder / "a.png") == date(2026, 10, 14)
+    monkeypatch.setattr(MainWindow, "prompt_default_date", lambda *args: second)
+    window.set_default_date()
+    assert window.footage_date.date().toPython() == date(2026, 10, 14)
+    window.files.selectRow(1)
+    assert window.footage_date.date().toPython() == second
+    window.clear_image()
+    assert window.footage_date.date().toPython() == second
+    assert not window.footage_date.isEnabled()
+    monkeypatch.setattr(
+        MainWindow, "prompt_default_date", lambda *args: pytest.fail("Repeat prompt")
+    )
+    window.open_folder(folder)
+    window.close()
+    restarted = MainWindow(repository, preferences)
+    restarted.open_folder(folder)
+    restarted.files.selectRow(0)
+    assert restarted.footage_date.date().toPython() == date(2026, 10, 14)
+    monkeypatch.setattr(MainWindow, "prompt_default_date", lambda *args: None)
+    other = tmp_path / "other"
+    other.mkdir()
+    restarted.open_folder(other)
+    assert restarted.folder == folder
+    assert preferences.folder_date(other) is None
+    restarted.close()
+    connection.close()
+
+
+def test_date_write_failure_restores_display(
+    application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the saved date visible when a database error rejects an edit."""
+    connection = connect(tmp_path / "dates.sqlite3")
+    repository = Repository(connection)
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor("teal"))
+    path = tmp_path / "frame.png"
+    image.save(str(path))
+    saved_date = date(2026, 10, 13)
+    repository.update_date(path, saved_date)
+    window = MainWindow(repository)
+    window.open_folder(tmp_path)
+    window.files.selectRow(0)
+    failures = []
+    monkeypatch.setattr(window, "report_error", failures.append)
+    connection.execute(
+        "CREATE TRIGGER reject_date BEFORE UPDATE OF Date ON IMAGE "
+        "BEGIN SELECT RAISE(ABORT, 'date rejected'); END"
+    )
+    window.footage_date.setDate(window.footage_date.date().addDays(1))
+    assert failures and "date rejected" in failures[0]
+    assert repository.image_date(path) == saved_date
+    assert window.footage_date.date().toPython() == saved_date
+    window.close()
+    connection.close()

@@ -1,6 +1,8 @@
 """Small user preferences file in Qt's standard per-application configuration directory."""
 
+import json
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths
@@ -98,3 +100,50 @@ class Preferences:
             brightness if -100 <= brightness <= 100 else 0,
             zoom if 100 <= zoom <= 400 else 100,
         )
+
+    def folder_dates(self) -> dict[str, date]:
+        """Read folder defaults, retaining entries for folders that have moved.
+
+        :return: Absolute folder paths mapped to recording dates.
+        :raises OSError: If preferences or the saved map cannot be read.
+        """
+        settings = QSettings(str(self.path), QSettings.Format.IniFormat)
+        raw = settings.value("images/folder_dates", "{}")
+        if settings.status() != QSettings.Status.NoError:
+            raise OSError(f"Cannot read preferences from {self.path}.")
+        try:
+            values = json.loads(raw)
+            return {key: date.fromisoformat(value) for key, value in values.items()}
+        except (TypeError, ValueError, AttributeError) as error:
+            raise OSError(f"Invalid folder dates in {self.path}.") from error
+
+    def save_folder_dates(self, values: dict[str, date]) -> None:
+        """Persist the complete folder/date map without changing other preferences."""
+        settings = QSettings(str(self.path), QSettings.Format.IniFormat)
+        settings.setValue(
+            "images/folder_dates",
+            json.dumps({key: value.isoformat() for key, value in values.items()}),
+        )
+        settings.sync()
+        if settings.status() != QSettings.Status.NoError:
+            raise OSError(f"Cannot save preferences to {self.path}.")
+
+    def folder_date(self, folder: Path) -> date | None:
+        """Return the selected folder's saved default, if any."""
+        return self.folder_dates().get(str(folder.resolve()))
+
+    def save_folder_date(self, folder: Path, value: date) -> None:
+        """Save a default recording date for a resolved folder path."""
+        values = self.folder_dates()
+        values[str(folder.resolve())] = value
+        self.save_folder_dates(values)
+
+    def map_folder_date(self, original: Path, replacement: Path) -> None:
+        """Move a saved default, preserving an existing destination default."""
+        values = self.folder_dates()
+        old_key, new_key = str(original.resolve()), str(replacement.resolve())
+        if old_key == new_key or old_key not in values:
+            return
+        value = values.pop(old_key)
+        values.setdefault(new_key, value)
+        self.save_folder_dates(values)
