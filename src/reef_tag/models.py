@@ -4,6 +4,15 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class ImagePathChange:
+    """A proposed path update guarded by the image's current stored path."""
+
+    image_id: int
+    original: str
+    replacement: str
+
+
+@dataclass(frozen=True)
 class Species:
     """A reusable catalogue entry."""
 

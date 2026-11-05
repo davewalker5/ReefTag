@@ -142,5 +142,5 @@ def test_further_examination_upgrade(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert repository.image_date(path) == date(2026, 10, 13)
     connection.close()
     connection = db.connect(database)
-    assert Repository(connection).further_examination_images() == {"fish.png"}
+    assert Repository(connection).further_examination_images() == {str(path.resolve())}
     connection.close()

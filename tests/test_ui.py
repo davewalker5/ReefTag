@@ -513,7 +513,7 @@ def test_unknown_marker_workflow(application: QApplication, tmp_path: Path, monk
     assert len(window.preview.pending) == 1
     assert window.annotations == []
     window.toggle_further_examination(0, 1)
-    assert repository.further_examination_images() == {path.name}
+    assert repository.further_examination_images() == {str(path.resolve())}
     window.refresh_folder()
     assert len(window.preview.pending) == 1
     window.show()

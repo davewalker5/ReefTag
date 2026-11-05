@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from reef_tag.config import database_path
 from reef_tag.db import MigrationError, connect
 from reef_tag.repositories import Repository
+from reef_tag.ui.folder_mapping_dialog import check_image_paths
 from reef_tag.ui.main_window import ICON_PATH, MainWindow
 
 
@@ -22,7 +23,9 @@ def main() -> int:
     connection = None
     try:
         connection = connect(database_path())
-        window = MainWindow(Repository(connection))
+        repository = Repository(connection)
+        check_image_paths(repository)
+        window = MainWindow(repository)
     except (ValueError, OSError, sqlite3.Error, MigrationError) as error:
         if connection is not None:
             connection.close()

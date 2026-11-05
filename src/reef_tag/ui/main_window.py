@@ -32,7 +32,8 @@ from PySide6.QtWidgets import (
 from reef_tag.files import discover_images
 from reef_tag.models import Identification, PendingIdentification
 from reef_tag.preferences import Preferences, PreviewSettings
-from reef_tag.repositories import Repository
+from reef_tag.repositories import Repository, image_identity
+from reef_tag.ui.folder_mapping_dialog import check_image_paths
 from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
 from reef_tag.ui.species_dialog import SpeciesDialog
 
@@ -90,6 +91,9 @@ class MainWindow(QMainWindow):
         )
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.resize(1250, 800)
+        tools_menu = self.menuBar().addMenu("Tools")
+        check_paths = tools_menu.addAction("Check Image Paths")
+        check_paths.triggered.connect(self.check_image_paths)
         splitter = QSplitter()
         self.setCentralWidget(splitter)
         left, right = QWidget(), QWidget()
@@ -211,6 +215,18 @@ class MainWindow(QMainWindow):
         self.reload_catalogue()
         self.statusBar().showMessage("Choose a folder to begin.")
         self.restore_folder()
+
+    def check_image_paths(self) -> None:
+        """Repeat folder recovery and refresh displayed annotations after a confirmed mapping."""
+        if not check_image_paths(self.repository, self, manual=True):
+            return
+        if self.folder is not None and self.folder.is_dir():
+            self.refresh_folder()
+        else:
+            self.paths = []
+            self.files.setRowCount(0)
+            self.clear_image()
+            self.statusBar().showMessage("Image paths updated. Choose a folder to continue.")
 
     def restore_folder(self) -> None:
         """Reopen the last folder if present; preference failures leave the app usable."""
@@ -345,7 +361,7 @@ class MainWindow(QMainWindow):
         matching = set().union(*(species_images.get(key, set()) for key in self.filtered_species))
         self.files.blockSignals(True)
         for row, path in enumerate(self.paths):
-            hidden = bool(self.filtered_species) and path.name not in matching
+            hidden = bool(self.filtered_species) and image_identity(path) not in matching
             self.files.setRowHidden(row, hidden)
         if self.current_path in self.paths:
             row = self.paths.index(self.current_path)
@@ -390,7 +406,7 @@ class MainWindow(QMainWindow):
         fill_table(self.files, [["", "", path.name, f"{size:.1f}"] for path, size in discovered])
         self.update_file_indicators(tagged_counts)
         for row, path in enumerate(self.paths):
-            self.update_examination_indicator(row, path.name in examination_images)
+            self.update_examination_indicator(row, image_identity(path) in examination_images)
         self.files.clearSelection()
         self.files.blockSignals(False)
         self.clear_image()
@@ -439,7 +455,7 @@ class MainWindow(QMainWindow):
     def update_file_indicators(self, tagged_counts: dict[str, int]) -> None:
         """Show a compact tick and accessible tag count for each annotated image."""
         for row, path in enumerate(self.paths):
-            count = tagged_counts.get(path.name, 0)
+            count = tagged_counts.get(image_identity(path), 0)
             item = self.files.item(row, 0)
             item.setIcon(self.tagged_icon if count else QIcon())
             description = f"{count} saved fish identification{'s' if count != 1 else ''}"
@@ -583,7 +599,7 @@ class MainWindow(QMainWindow):
             self.update_file_indicators(self.repository.tagged_image_counts())
             examination_images = self.repository.further_examination_images()
             for row, path in enumerate(self.paths):
-                self.update_examination_indicator(row, path.name in examination_images)
+                self.update_examination_indicator(row, image_identity(path) in examination_images)
             self.apply_species_filters()
             self.statusBar().showMessage(
                 "Identification saved." if not dialog.deleted else "Identification deleted."
