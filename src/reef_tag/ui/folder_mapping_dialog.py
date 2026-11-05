@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from reef_tag.folder_mapping import FolderCandidate, discover_missing_folders, validate_replacement
+from reef_tag.preferences import Preferences
 from reef_tag.repositories import Repository
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class FolderMappingDialog(QDialog):
         repository: Repository,
         candidates: tuple[FolderCandidate, ...],
         parent: QWidget | None = None,
+        preferences: Preferences | None = None,
     ) -> None:
         """Build the wireframe layout without validating or applying any mapping.
 
@@ -61,6 +63,7 @@ class FolderMappingDialog(QDialog):
             raise ValueError("Folder Mapping requires at least one missing folder.")
         super().__init__(parent)
         self.repository = repository
+        self.preferences = preferences if preferences is not None else Preferences()
         self.selections = [MappingSelection(item, str(item.directory)) for item in candidates]
         self.index = 0
         self.changed = False
@@ -229,10 +232,24 @@ class FolderMappingDialog(QDialog):
         state.selection = str(replacement.directory)
         self.changed = True
         self.show_candidate()
+        try:
+            self.preferences.map_folder_date(state.candidate.directory, replacement.directory)
+        except OSError as error:
+            LOGGER.exception("Cannot map folder default date")
+            QMessageBox.warning(
+                self,
+                "Folder default date not updated",
+                "Image paths were updated, but the folder default date could not be saved."
+                f"\n\n{error}",
+            )
 
 
 def check_image_paths(
-    repository: Repository, parent: QWidget | None = None, *, manual: bool = False
+    repository: Repository,
+    parent: QWidget | None = None,
+    *,
+    manual: bool = False,
+    preferences: Preferences | None = None,
 ) -> bool:
     """Run the shared startup/manual check without making recovery failures fatal.
 
@@ -261,6 +278,6 @@ def check_image_paths(
                 parent, "Check Image Paths", "All image folders referenced by ReefTag were found."
             )
         return False
-    dialog = FolderMappingDialog(repository, result.candidates, parent)
+    dialog = FolderMappingDialog(repository, result.candidates, parent, preferences)
     dialog.exec()
     return dialog.changed

@@ -104,11 +104,12 @@ class Repository:
             )
 
     def update_date(self, path: Path, footage_date: date) -> None:
-        """Update an existing image only; never create an empty image record."""
+        """Save an image date, creating an untagged record when necessary."""
         with self.connection:
             self.connection.execute(
-                "UPDATE IMAGE SET Date=? WHERE Name=?",
-                (footage_date.isoformat(), image_identity(path)),
+                "INSERT INTO IMAGE (Name, Date) VALUES (?, ?) "
+                "ON CONFLICT(Name) DO UPDATE SET Date=excluded.Date",
+                (image_identity(path), footage_date.isoformat()),
             )
 
     def identifications(self, path: Path) -> list[Identification]:

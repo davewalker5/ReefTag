@@ -78,3 +78,35 @@ def test_preview_preferences_and_invalid_values(tmp_path: Path) -> None:
         settings.setValue("preview/zoom", zoom)
         settings.sync()
         assert preferences.preview_settings() == PreviewSettings()
+
+
+def test_folder_dates_and_mapping(tmp_path: Path) -> None:
+    """Round-trip independent defaults and move missing-folder entries safely."""
+    from datetime import date
+
+    preferences = Preferences(tmp_path / "preferences.ini")
+    original, replacement = tmp_path / "old #1", tmp_path / "new"
+    day = date(2026, 10, 13)
+    assert preferences.folder_date(original) is None
+    preferences.save_folder_date(original, day)
+    assert Preferences(preferences.path).folder_date(original) == day
+    preferences.map_folder_date(original, replacement)
+    assert preferences.folder_date(original) is None
+    assert preferences.folder_date(replacement) == day
+    preferences.save_folder_date(original, date(2026, 10, 14))
+    preferences.map_folder_date(original, replacement)
+    assert preferences.folder_date(replacement) == day
+    assert preferences.folder_date(original) is None
+
+
+def test_malformed_folder_dates(tmp_path: Path) -> None:
+    """Reject corrupt maps rather than overwriting saved defaults."""
+    from PySide6.QtCore import QSettings
+
+    path = tmp_path / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    for raw in ("not json", "[]", '{"folder": "2026-02-30"}'):
+        settings.setValue("images/folder_dates", raw)
+        settings.sync()
+        with pytest.raises(OSError, match="Invalid folder dates"):
+            Preferences(path).folder_dates()
