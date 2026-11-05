@@ -4,15 +4,12 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from reef_tag.models import Identification, PendingIdentification, Species
+from reef_tag.models import Identification, ImagePathChange, PendingIdentification, Species
 
 
 def image_identity(path: Path) -> str:
-    """Identify images by filename only, so moving their folder preserves annotations.
-
-    Equal filenames in different folders intentionally refer to the same saved image.
-    """
-    return path.name
+    """Identify an image by its resolved absolute filesystem path."""
+    return str(path.resolve())
 
 
 class Repository:
@@ -21,6 +18,32 @@ class Repository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         """Retain the connection; the application owns closing it."""
         self.connection = connection
+
+    def image_paths(self) -> dict[int, str]:
+        """Return stored image paths keyed by ID in a single query."""
+        return dict(self.connection.execute("SELECT id, Name FROM IMAGE"))
+
+    def update_image_paths(self, changes: tuple[ImagePathChange, ...]) -> None:
+        """Atomically apply confirmed paths without changing image IDs or metadata.
+
+        :param changes: Validated replacements with their expected original paths.
+        :raises ValueError: If a record changed since the mapping was prepared.
+        :raises sqlite3.Error: If any update fails; all changes are rolled back.
+        """
+        if not changes:
+            return
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            for change in changes:
+                cursor = self.connection.execute(
+                    "UPDATE IMAGE SET Name=? WHERE id=? AND Name=?",
+                    (change.replacement, change.image_id, change.original),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        "Image paths changed during folder mapping. Close the dialog "
+                        "and run Check Image Paths again."
+                    )
 
     def species(self) -> list[Species]:
         """Return the complete catalogue in deterministic common-name order."""
@@ -40,7 +63,7 @@ class Repository:
         return date.fromisoformat(row[0]) if row else None
 
     def tagged_image_counts(self) -> dict[str, int]:
-        """Return annotation counts by stored filename, excluding untagged images."""
+        """Return annotation counts by stored image path, excluding untagged images."""
         return dict(
             self.connection.execute(
                 "SELECT m.Name, COUNT(*) FROM IMAGE m "
@@ -49,9 +72,9 @@ class Repository:
         )
 
     def species_image_names(self) -> dict[int, set[str]]:
-        """Return identified filenames grouped by species ID.
+        """Return identified image paths grouped by species ID.
 
-        :return: Species IDs mapped to unique stored image filenames.
+        :return: Species IDs mapped to unique stored image paths.
         """
         images: dict[int, set[str]] = {}
         for species_id, name in self.connection.execute(
@@ -62,7 +85,7 @@ class Repository:
         return images
 
     def further_examination_images(self) -> set[str]:
-        """Return filenames flagged for further examination, including untagged images."""
+        """Return image paths flagged for further examination, including untagged images."""
         return {
             row[0]
             for row in self.connection.execute("SELECT Name FROM IMAGE WHERE FurtherExamination=1")
@@ -204,7 +227,7 @@ class Repository:
             self.connection.execute("DELETE FROM IDENTIFICATION WHERE id=?", (identification_id,))
 
     def pending_identifications(self, path: Path) -> list[PendingIdentification]:
-        """Return unknown markers for a filename in stable creation order.
+        """Return unknown markers for an image path in stable creation order.
 
         :param path: Photograph whose markers should be loaded.
         :return: Saved markers in original-image pixels.

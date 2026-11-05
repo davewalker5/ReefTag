@@ -52,19 +52,35 @@ def test_edit_is_local(repository: Repository, tmp_path: Path) -> None:
     assert repository.identifications(second)[0].species.common_name == "A"
 
 
-def test_image_identity_is_filename_only(repository: Repository, tmp_path: Path) -> None:
-    """Store only the filename and reuse annotations and dates after a folder move."""
+def test_image_identity_uses_full_path(repository: Repository, tmp_path: Path) -> None:
+    """Keep same-named photographs in different folders independent."""
     original = tmp_path / "original" / "frame.PNG"
     relocated = tmp_path / "relocated" / "frame.PNG"
     repository.create(original, DAY, 10, 20, "A", "Alpha")
-    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == "frame.PNG"
-    assert repository.identifications(relocated) == repository.identifications(original)
-    assert repository.image_date(relocated) == DAY
-    repository.update_date(relocated, date(2026, 10, 14))
-    assert repository.image_date(original) == date(2026, 10, 14)
+    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == str(original)
+    assert repository.identifications(relocated) == []
+    assert repository.image_date(relocated) is None
     repository.create(relocated, DAY, 30, 40, "A", "Alpha")
-    assert repository.connection.execute("SELECT COUNT(*) FROM IMAGE").fetchone()[0] == 1
-    assert [a.number for a in repository.identifications(original)] == [1, 2]
+    repository.update_date(relocated, date(2026, 10, 14))
+    assert repository.image_date(original) == DAY
+    assert repository.image_date(relocated) == date(2026, 10, 14)
+    assert repository.connection.execute("SELECT COUNT(*) FROM IMAGE").fetchone()[0] == 2
+    assert [a.number for a in repository.identifications(original)] == [1]
+    assert [a.number for a in repository.identifications(relocated)] == [1]
+    assert repository.tagged_image_counts() == {str(original): 1, str(relocated): 1}
+
+
+def test_relative_image_path_is_stored_as_absolute(
+    repository: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolve relative paths consistently for writes and subsequent lookups."""
+    monkeypatch.chdir(tmp_path)
+    relative = Path("photos") / "frame.png"
+    repository.create_pending(relative, DAY, 10, 20)
+    absolute = tmp_path / relative
+    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == str(absolute)
+    assert repository.pending_identifications(absolute) == repository.pending_identifications(relative)
+    assert repository.further_examination_images() == {str(absolute)}
 
 
 def test_atomic_failure_and_foreign_keys(repository: Repository, tmp_path: Path) -> None:
@@ -160,7 +176,7 @@ def test_pending_lifecycle(tmp_path: Path) -> None:
     repository.create_pending(path, footage_date, 56, 78)
     pending = repository.pending_identifications(path)
     assert [(item.x, item.y) for item in pending] == [(12, 34), (56, 78)]
-    assert repository.further_examination_images() == {path.name}
+    assert repository.further_examination_images() == {str(path)}
     with pytest.raises(ValueError, match="Resolve all unknown"):
         repository.set_further_examination(path, footage_date, False)
     with pytest.raises(ValueError):
@@ -174,14 +190,14 @@ def test_pending_lifecycle(tmp_path: Path) -> None:
     repository = Repository(connection)
     assert repository.pending_identifications(path) == pending[1:]
     repository.delete_pending(pending[1].id)
-    assert repository.further_examination_images() == {path.name}
+    assert repository.further_examination_images() == {str(path)}
     repository.set_further_examination(path, footage_date, False)
     assert repository.further_examination_images() == set()
     connection.close()
 
 
 def test_species_image_names(repository: Repository, tmp_path: Path) -> None:
-    """Group distinct filenames by species, excluding unknowns and removed observations."""
+    """Group distinct image paths by species, excluding unknowns and removed observations."""
     first, second = tmp_path / "one.png", tmp_path / "two.png"
     for path in (first, first, second):
         repository.create(path, DAY, 1, 2, "A", "Alpha")
@@ -189,8 +205,8 @@ def test_species_image_names(repository: Repository, tmp_path: Path) -> None:
     repository.create_pending(tmp_path / "unknown.png", DAY, 1, 2)
     species_a, species_b = repository.species()
     assert repository.species_image_names() == {
-        species_a.id: {first.name, second.name},
-        species_b.id: {second.name},
+        species_a.id: {str(first), str(second)},
+        species_b.id: {str(second)},
     }
     repository.delete(repository.identifications(second)[-1].id)
-    assert repository.species_image_names() == {species_a.id: {first.name, second.name}}
+    assert repository.species_image_names() == {species_a.id: {str(first), str(second)}}
