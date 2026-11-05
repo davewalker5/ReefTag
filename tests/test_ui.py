@@ -305,8 +305,8 @@ def test_zoom_right_drag_and_reset(application: QApplication, tmp_path: Path) ->
     application.processEvents()
     mapping = view.geometry_map()
     left, top = mapping.offset
-    assert left <= 0 and left + image.width() * mapping.scale >= view.width()
-    assert top <= 0 and top + image.height() * mapping.scale >= view.height()
+    assert left <= 0 and left + image.width() * mapping.scale >= mapping.viewport_width
+    assert top <= 0 and top + image.height() * mapping.scale >= mapping.viewport_height
     window.brightness_slider.setValue(40)
     window.brightness_reset.click()
     assert view.zoom == 1
@@ -608,3 +608,47 @@ def test_species_filters(
     assert not any(restarted.files.isRowHidden(row) for row in range(4))
     restarted.close()
     connection.close()
+
+
+def test_preview_scrollbars(application: QApplication) -> None:
+    """Scroll both axes, synchronize drag, and restore full tracks at fit zoom."""
+    from PySide6.QtGui import QPixmap
+
+    from reef_tag.ui.image_view import ImageView
+
+    view = ImageView()
+    view.resize(600, 400)
+    view.show()
+    view.set_image(QPixmap(800, 600), [])
+    application.processEvents()
+    horizontal, vertical = view.horizontal_scrollbar, view.vertical_scrollbar
+    assert horizontal.isVisible() and vertical.isVisible()
+    assert horizontal.maximum() == vertical.maximum() == 0
+    view.set_zoom(300)
+    assert horizontal.maximum() > 0 and vertical.maximum() > 0
+    horizontal.setValue(horizontal.maximum())
+    vertical.setValue(vertical.maximum())
+    mapping = view.geometry_map()
+    left, top = mapping.offset
+    assert abs(left + 800 * mapping.scale - mapping.viewport_width) <= 1
+    assert abs(top + 600 * mapping.scale - mapping.viewport_height) <= 1
+    horizontal.setValue(0)
+    vertical.setValue(0)
+    assert view.geometry_map().offset == (0, 0)
+    centre = QPoint(250, 180)
+    QTest.mousePress(view, Qt.MouseButton.RightButton, pos=centre)
+    QTest.mouseMove(view, centre - QPoint(60, 40))
+    QTest.mouseRelease(view, Qt.MouseButton.RightButton, pos=centre - QPoint(60, 40))
+    assert horizontal.value() == 60
+    assert vertical.value() == 40
+    view.resize(700, 450)
+    application.processEvents()
+    assert horizontal.pageStep() == view.geometry_map().viewport_width
+    assert vertical.pageStep() == view.geometry_map().viewport_height
+    view.set_zoom(100)
+    assert horizontal.maximum() == vertical.maximum() == 0
+    assert view.geometry_map().bounded_pan == (0, 0)
+    view.set_zoom(300)
+    view.set_image(QPixmap(), [])
+    assert horizontal.maximum() == vertical.maximum() == 0
+    view.close()
