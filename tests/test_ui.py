@@ -740,3 +740,57 @@ def test_date_write_failure_restores_display(
     assert window.footage_date.date().toPython() == saved_date
     window.close()
     connection.close()
+
+
+def test_csv_menu_workflow(
+    application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate export by folder, honour save cancellation and refresh imported markers."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    from reef_tag.data_transfer import export_csv, folder_records
+
+    connection = connect(tmp_path / "transfer.sqlite3")
+    repository = Repository(connection)
+    image_path = tmp_path / "fish.png"
+    image = QImage(40, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor("teal"))
+    image.save(str(image_path))
+    window = MainWindow(repository)
+    assert window.import_action.isEnabled()
+    assert not window.export_action.isEnabled()
+    assert [action.text() for action in window.menuBar().actions()] == ["File", "Tools"]
+    window.open_folder(tmp_path)
+    assert window.export_action.isEnabled()
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args))
+    window.export_data()
+    assert len(warnings) == 1
+    repository.create_pending(image_path, date(2026, 10, 13), 10, 12)
+    source = tmp_path / "source.csv"
+    export_csv(source, folder_records(repository, tmp_path))
+    destination = tmp_path / "destination.csv"
+    destination.write_text("keep me", encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
+    messages = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args))
+    window.export_data()
+    assert destination.read_text() == "keep me"
+    assert messages == []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(destination), ""))
+    window.export_data()
+    assert destination.read_bytes() == source.read_bytes()
+    repository.delete_pending(repository.pending_identifications(image_path)[0].id)
+    window.refresh_folder()
+    window.files.selectRow(0)
+    assert window.pending == []
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(source), ""))
+    window.import_data()
+    assert len(window.pending) == 1
+    assert window.current_path == image_path
+    assert "Unknown markers: 1" in messages[-1][-1]
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
+    window.import_data()
+    assert len(messages) == 2
+    window.close()
+    connection.close()
