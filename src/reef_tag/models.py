@@ -19,6 +19,7 @@ class Species:
     id: int
     common_name: str
     scientific_name: str
+    category_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -39,3 +40,12 @@ class PendingIdentification:
     id: int
     x: int
     y: int
+
+
+@dataclass(frozen=True)
+class Category:
+    """A named species group and its current catalogue usage."""
+
+    id: int
+    name: str
+    species_count: int = 0

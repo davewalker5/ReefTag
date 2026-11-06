@@ -180,3 +180,47 @@ def test_cli_environment_and_options(
     assert "Transfer failed" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         main(["-d", DAY])
+
+
+def test_category_aware_transfer(databases: tuple[Path, Path]) -> None:
+    """Create categories once with audit values and match names without case."""
+    source, target = databases
+    with sqlite3.connect(source) as connection:
+        connection.executescript("""
+            CREATE TABLE CATEGORY (Id INTEGER PRIMARY KEY, Name TEXT NOT NULL);
+            ALTER TABLE SPECIES ADD COLUMN CategoryId INTEGER REFERENCES CATEGORY(Id);
+            INSERT INTO CATEGORY VALUES (1, 'Molluscs'), (2, 'fish');
+            UPDATE SPECIES SET CategoryId=1 WHERE Id=1;
+            UPDATE SPECIES SET CategoryId=2 WHERE Id=2;
+        """)
+    assert transfer(source, target, "Reef", DAY) == TransferResult(2, 2, 0)
+    with sqlite3.connect(target) as connection:
+        stamp = f"{date.today()} 00:00:00"
+        assert connection.execute(
+            "SELECT Created_By, Updated_By, Date_Created, Date_Updated, Supports_Gender "
+            "FROM Categories WHERE Name='Molluscs'"
+        ).fetchone() == (1, 1, stamp, stamp, 1)
+        assert connection.execute(
+            "SELECT c.Name FROM Species s JOIN Categories c ON c.Id=s.CategoryId ORDER BY s.Id"
+        ).fetchall() == [("Molluscs",), ("Fish",)]
+    assert transfer(source, target, "Reef", DAY) == TransferResult(0, 0, 2)
+    with sqlite3.connect(target) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM Categories").fetchone()[0] == 3
+
+
+def test_uncategorized_transfer_rolls_back(databases: tuple[Path, Path]) -> None:
+    """Require a category for new species and roll back earlier category inserts."""
+    source, target = databases
+    with sqlite3.connect(source) as connection:
+        connection.executescript("""
+            CREATE TABLE CATEGORY (Id INTEGER PRIMARY KEY, Name TEXT NOT NULL);
+            ALTER TABLE SPECIES ADD COLUMN CategoryId INTEGER REFERENCES CATEGORY(Id);
+            INSERT INTO CATEGORY VALUES (1, 'Molluscs');
+            UPDATE SPECIES SET CategoryId=1 WHERE Id=1;
+        """)
+    with pytest.raises(ValueError, match="Select a category"):
+        transfer(source, target, "Reef", DAY)
+    with sqlite3.connect(target) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM Categories").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM Species").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM Sightings").fetchone()[0] == 0

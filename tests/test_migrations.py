@@ -24,10 +24,11 @@ def test_initial_migration_and_repeat_startup(tmp_path: Path) -> None:
         "0001_initial_schema",
         "0002_further_examination",
         "0003_pending_identification",
+        "0004_species_categories",
     }
     connection.close()
     connection = db.connect(path)
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 3
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 4
     assert len(Repository(connection).identifications(tmp_path / "fish.png")) == 1
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     connection.close()
@@ -52,7 +53,7 @@ def test_initial_rollback_and_reapply(tmp_path: Path) -> None:
         assert not tables.intersection({"IMAGE", "SPECIES", "IDENTIFICATION"})
     connection = db.connect(path)
     assert connection.execute("SELECT COUNT(*) FROM IDENTIFICATION").fetchone()[0] == 0
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 3
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 4
     connection.close()
 
 
@@ -72,7 +73,7 @@ def test_pending_upgrade_and_failed_migration(
     )
     connection = db.connect(path)
     assert connection.execute("SELECT Notes FROM IMAGE").fetchone()[0] is None
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 4
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 5
     connection.close()
     (migration_path / "0004_test_failure.sql").write_text(
         "-- depends: 0003_test_upgrade\nCREATE TABLE partial_change (id INTEGER);\n"
@@ -85,7 +86,7 @@ def test_pending_upgrade_and_failed_migration(
         connection.execute("SELECT name FROM sqlite_master WHERE name='partial_change'").fetchone()
         is None
     )
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 4
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 5
     assert connection.execute("SELECT COUNT(*) FROM IDENTIFICATION").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM yoyo_lock").fetchone()[0] == 0
     connection.close()
@@ -127,8 +128,14 @@ def test_further_examination_upgrade(tmp_path: Path, monkeypatch: pytest.MonkeyP
     database = tmp_path / "reef.sqlite3"
     path = tmp_path / "fish.png"
     connection = db.connect(database)
-    Repository(connection).create(path, date(2026, 10, 13), 10, 20, "A", "Alpha")
-    observations = Repository(connection).identifications(path)
+    connection.executescript(
+        f"INSERT INTO IMAGE (id, Name, Date) VALUES (1, '{path}', '2026-10-13');"
+        "INSERT INTO SPECIES VALUES (1, 'A', 'Alpha');"
+        "INSERT INTO IDENTIFICATION VALUES (1, 1, 1, 1, 10, 20);"
+    )
+    from reef_tag.models import Identification, Species
+
+    observations = [Identification(1, 1, 10, 20, Species(1, "A", "Alpha"))]
     connection.close()
     monkeypatch.setattr(db, "MIGRATIONS_PATH", original_migrations)
     connection = db.connect(database)

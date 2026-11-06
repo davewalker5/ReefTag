@@ -4,7 +4,13 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from reef_tag.models import Identification, ImagePathChange, PendingIdentification, Species
+from reef_tag.models import (
+    Category,
+    Identification,
+    ImagePathChange,
+    PendingIdentification,
+    Species,
+)
 
 
 def image_identity(path: Path) -> str:
@@ -50,7 +56,7 @@ class Repository:
         return [
             Species(*row)
             for row in self.connection.execute(
-                "SELECT id, CommonName, ScientificName FROM SPECIES "
+                "SELECT id, CommonName, ScientificName, CategoryId FROM SPECIES "
                 "ORDER BY CommonName COLLATE NOCASE, id"
             )
         ]
@@ -116,7 +122,7 @@ class Repository:
         """Return an image's observations in stable number order."""
         rows = self.connection.execute(
             """
-            SELECT i.id, i.Number, i.X, i.Y, s.id, s.CommonName, s.ScientificName
+            SELECT i.id, i.Number, i.X, i.Y, s.id, s.CommonName, s.ScientificName, s.CategoryId
             FROM IDENTIFICATION i JOIN IMAGE m ON m.id=i.ImageId
             JOIN SPECIES s ON s.id=i.SpeciesId WHERE m.Name=? ORDER BY i.Number
         """,
@@ -124,7 +130,9 @@ class Repository:
         )
         return [Identification(*row[:4], Species(*row[4:])) for row in rows]
 
-    def _resolve_species(self, common_name: str, scientific_name: str) -> int:
+    def _resolve_species(
+        self, common_name: str, scientific_name: str, category_id: int | None = None
+    ) -> int:
         """Reuse an exact name pair, or create it; reject conflicting unique names."""
         common_name, scientific_name = common_name.strip(), scientific_name.strip()
         if not common_name or not scientific_name:
@@ -136,14 +144,17 @@ class Repository:
         ).fetchall()
         if rows:
             if len(rows) == 1 and tuple(rows[0][1:]) == (common_name, scientific_name):
+                self.connection.execute(
+                    "UPDATE SPECIES SET CategoryId=? WHERE id=?", (category_id, rows[0][0])
+                )
                 return rows[0][0]
             existing = "; ".join(f"{row[1]} ({row[2]})" for row in rows)
             raise ValueError(
                 f"A name already belongs to {existing}. Select it or correct the names."
             )
         cursor = self.connection.execute(
-            "INSERT INTO SPECIES (CommonName, ScientificName) VALUES (?, ?)",
-            (common_name, scientific_name),
+            "INSERT INTO SPECIES (CommonName, ScientificName, CategoryId) VALUES (?, ?, ?)",
+            (common_name, scientific_name, category_id),
         )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
@@ -158,6 +169,7 @@ class Repository:
         scientific_name: str,
         *,
         pending_id: int | None = None,
+        category_id: int | None = None,
     ) -> None:
         """Atomically save an identification, optionally replacing an unknown marker.
 
@@ -167,6 +179,7 @@ class Repository:
         :param y: Original vertical pixel coordinate for a new identification.
         :param common_name: Selected species common name.
         :param scientific_name: Selected species scientific name.
+        :param category_id: Category assigned to the selected or newly created species.
         :param pending_id: Unknown marker to replace, using its saved coordinates.
         :raises ValueError: If coordinates, species names or the pending marker are invalid.
         """
@@ -186,7 +199,7 @@ class Repository:
                 self.connection.execute(
                     "DELETE FROM PENDING_IDENTIFICATION WHERE id=?", (pending_id,)
                 )
-            species_id = self._resolve_species(common_name, scientific_name)
+            species_id = self._resolve_species(common_name, scientific_name, category_id)
             identity = image_identity(path)
             row = self.connection.execute(
                 "SELECT id FROM IMAGE WHERE Name=?", (identity,)
@@ -209,15 +222,29 @@ class Repository:
                 (image_id, species_id, number, x, y),
             )
 
-    def edit(self, identification_id: int, common_name: str, scientific_name: str) -> None:
-        """Change only the selected observation's species assignment."""
+    def edit(
+        self,
+        identification_id: int,
+        common_name: str,
+        scientific_name: str,
+        *,
+        category_id: int | None = None,
+    ) -> None:
+        """Assign an observation to a species and save that species category.
+
+        :param identification_id: Observation to reassign.
+        :param common_name: Selected or new common name.
+        :param scientific_name: Selected or new scientific name.
+        :param category_id: Shared species category, or None to clear it.
+        :raises ValueError: If the observation is missing or species names conflict.
+        """
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             if not self.connection.execute(
                 "SELECT 1 FROM IDENTIFICATION WHERE id=?", (identification_id,)
             ).fetchone():
                 raise ValueError("This identification no longer exists. Refresh the image.")
-            species_id = self._resolve_species(common_name, scientific_name)
+            species_id = self._resolve_species(common_name, scientific_name, category_id)
             self.connection.execute(
                 "UPDATE IDENTIFICATION SET SpeciesId=? WHERE id=?", (species_id, identification_id)
             )
@@ -272,3 +299,73 @@ class Repository:
         """
         with self.connection:
             self.connection.execute("DELETE FROM PENDING_IDENTIFICATION WHERE id=?", (pending_id,))
+
+    def categories(self) -> list[Category]:
+        """Return categories with species counts in name order."""
+        return [
+            Category(*row)
+            for row in self.connection.execute(
+                "SELECT c.Id, c.Name, COUNT(s.id) FROM CATEGORY c "
+                "LEFT JOIN SPECIES s ON s.CategoryId=c.Id GROUP BY c.Id "
+                "ORDER BY c.Name COLLATE NOCASE, c.Id"
+            )
+        ]
+
+    def save_category(self, name: str, category_id: int | None = None) -> None:
+        """Create or rename a category, rejecting blank or duplicate names."""
+        name = name.strip()
+        if not name:
+            raise ValueError("Enter a category name.")
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if any(
+                c.name.casefold() == name.casefold() and c.id != category_id
+                for c in self.categories()
+            ):
+                raise ValueError("A category with that name already exists.")
+            if category_id is None:
+                self.connection.execute("INSERT INTO CATEGORY (Name) VALUES (?)", (name,))
+            elif (
+                self.connection.execute(
+                    "UPDATE CATEGORY SET Name=? WHERE Id=?", (name, category_id)
+                ).rowcount
+                != 1
+            ):
+                raise ValueError("This category no longer exists.")
+
+    def delete_category(self, category_id: int) -> None:
+        """Delete an unused category; reject deletion while species reference it."""
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if self.connection.execute(
+                "SELECT 1 FROM SPECIES WHERE CategoryId=?", (category_id,)
+            ).fetchone():
+                raise ValueError("This category is used by species and cannot be deleted.")
+            self.connection.execute("DELETE FROM CATEGORY WHERE Id=?", (category_id,))
+
+    def update_species(
+        self, species_id: int, common_name: str, scientific_name: str, category_id: int | None
+    ) -> None:
+        """Update a shared catalogue entry without changing observation assignments."""
+        common_name, scientific_name = common_name.strip(), scientific_name.strip()
+        if not common_name or not scientific_name:
+            raise ValueError("Both common name and scientific name are required.")
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if any(
+                s.id != species_id
+                and (
+                    s.common_name.casefold() == common_name.casefold()
+                    or s.scientific_name.casefold() == scientific_name.casefold()
+                )
+                for s in self.species()
+            ):
+                raise ValueError("A species with one of these names already exists.")
+            if (
+                self.connection.execute(
+                    "UPDATE SPECIES SET CommonName=?, ScientificName=?, CategoryId=? WHERE id=?",
+                    (common_name, scientific_name, category_id, species_id),
+                ).rowcount
+                != 1
+            ):
+                raise ValueError("This species no longer exists.")

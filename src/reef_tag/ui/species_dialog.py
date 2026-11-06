@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from reef_tag.models import Identification, PendingIdentification, Species
+from reef_tag.models import Category, Identification, PendingIdentification, Species
 
 
 class SpeciesDialog(QDialog):
@@ -24,6 +24,7 @@ class SpeciesDialog(QDialog):
         catalogue: list[Species],
         annotation: Identification | PendingIdentification | None,
         parent: QWidget,
+        categories: list[Category] | None = None,
     ) -> None:
         """Populate catalogue and optional edit context without persisting anything."""
         super().__init__(parent)
@@ -35,6 +36,10 @@ class SpeciesDialog(QDialog):
         self.selector.addItem("Enter a new species…")
         for species in catalogue:
             self.selector.addItem(f"{species.common_name} ({species.scientific_name})")
+        self.category = QComboBox()
+        self.category.addItem("", None)
+        for category in categories or []:
+            self.category.addItem(category.name, category.id)
         self.common = QLineEdit()
         self.scientific = QLineEdit()
         self.selector.currentIndexChanged.connect(self.select_species)
@@ -47,16 +52,20 @@ class SpeciesDialog(QDialog):
                 else "Unknown"
             )
             layout.addWidget(QLabel(f"{label} · pixel ({annotation.x}, {annotation.y})"))
-        form = QFormLayout()
+        form = self.form = QFormLayout()
         # Grow every field on macOS too, where the native form style can cap widths.
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(16)
-        form.addRow("Species", self.selector)
+        form.addRow("Identified Species", self.selector)
         form.addRow("Common Name", self.common)
         form.addRow("Scientific Name", self.scientific)
+        form.addRow("Category", self.category)
         layout.addLayout(form)
-        layout.addWidget(QLabel("Changing names assigns a species to this identification only."))
+        self.hint = QLabel(
+            "Names assign a species to this identification. Category changes apply to the species."
+        )
+        layout.addWidget(self.hint)
         # Explicit ordering keeps Unknown between Cancel and OK across native styles.
         buttons = QHBoxLayout()
         if annotation:
@@ -68,7 +77,7 @@ class SpeciesDialog(QDialog):
         cancel.clicked.connect(self.reject)
         buttons.addWidget(cancel)
         if not isinstance(annotation, Identification):
-            unknown = QPushButton("Unknown")
+            unknown = self.unknown_button = QPushButton("Unknown")
             unknown.clicked.connect(self.mark_unknown)
             buttons.addWidget(unknown)
         ok = QPushButton("OK")
@@ -89,8 +98,15 @@ class SpeciesDialog(QDialog):
     def select_species(self, index: int) -> None:
         """Fill names from the catalogue, or clear for explicit new entry."""
         species = self.catalogue[index - 1] if index else None
+        self.category.setCurrentIndex(
+            max(0, self.category.findData(species.category_id if species else None))
+        )
         self.common.setText(species.common_name if species else "")
         self.scientific.setText(species.scientific_name if species else "")
+
+    def category_id(self) -> int | None:
+        """Return the selected category ID, including the empty selection."""
+        return self.category.currentData()
 
     def names(self) -> tuple[str, str]:
         """Return whitespace-trimmed display names."""
