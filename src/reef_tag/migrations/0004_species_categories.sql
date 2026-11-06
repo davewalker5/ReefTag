@@ -1,0 +1,7 @@
+-- depends: 0003_pending_identification
+CREATE TABLE CATEGORY (
+    Id INTEGER PRIMARY KEY,
+    Name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(trim(Name)) > 0)
+);
+ALTER TABLE SPECIES ADD COLUMN CategoryId INTEGER REFERENCES CATEGORY(Id);
+CREATE INDEX idx_species_category ON SPECIES(CategoryId);

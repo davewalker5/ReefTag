@@ -34,6 +34,7 @@ from reef_tag.files import discover_images
 from reef_tag.models import Identification, PendingIdentification
 from reef_tag.preferences import Preferences, PreviewSettings
 from reef_tag.repositories import Repository, image_identity
+from reef_tag.ui.category_dialog import CategoriesDialog, SpeciesMaintenanceDialog
 from reef_tag.ui.folder_mapping_dialog import check_image_paths
 from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
 from reef_tag.ui.species_dialog import SpeciesDialog
@@ -92,11 +93,12 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.resize(1250, 800)
         tools_menu = self.menuBar().addMenu("Tools")
-        check_paths = tools_menu.addAction("Check Image Paths")
-        check_paths.triggered.connect(self.check_image_paths)
+        tools_menu.addAction("Manage Categories").triggered.connect(self.edit_categories)
         self.set_default_date_action = tools_menu.addAction("Set Default Date")
         self.set_default_date_action.setEnabled(False)
         self.set_default_date_action.triggered.connect(self.set_default_date)
+        check_paths = tools_menu.addAction("Check Image Paths")
+        check_paths.triggered.connect(self.check_image_paths)
         splitter = QSplitter()
         self.setCentralWidget(splitter)
         left, right = QWidget(), QWidget()
@@ -211,6 +213,7 @@ class MainWindow(QMainWindow):
             "Filter images by species; multiple filters match any selected species"
         )
         self.catalogue.cellClicked.connect(self.toggle_species_filter)
+        self.catalogue.cellDoubleClicked.connect(self.edit_species)
         self.tabs.addTab(self.current, "Current Image")
         self.tabs.addTab(self.catalogue, "All Species")
         observations.addWidget(self.tabs, 1)
@@ -379,6 +382,25 @@ class MainWindow(QMainWindow):
             )
             cell.setToolTip(description)
             cell.setData(Qt.ItemDataRole.AccessibleTextRole, description)
+
+    def edit_categories(self) -> None:
+        """Open category maintenance."""
+        CategoriesDialog(self.repository, self).exec()
+
+    def edit_species(self, row: int, column: int) -> None:
+        """Edit a catalogue entry and refresh all displayed observation names."""
+        if column == 2:
+            return
+        species_id = self.catalogue.item(row, 2).data(Qt.ItemDataRole.UserRole)
+        species = next(item for item in self.repository.species() if item.id == species_id)
+        if (
+            SpeciesMaintenanceDialog(self.repository, species, self).exec()
+            == QDialog.DialogCode.Accepted
+        ):
+            self.reload_catalogue()
+            if self.current_path is not None:
+                self.annotations = self.repository.identifications(self.current_path)
+                self.populate_current()
 
     def species_filter_icon(self, active: bool) -> QIcon:
         """Draw a funnel with a distinct colour when its species filter is active.
@@ -633,7 +655,9 @@ class MainWindow(QMainWindow):
         if self.current_path is None:
             return
         try:
-            dialog = SpeciesDialog(self.repository.species(), annotation, self)
+            dialog = SpeciesDialog(
+                self.repository.species(), annotation, self, self.repository.categories()
+            )
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             value = self.footage_date.date()
@@ -649,17 +673,27 @@ class MainWindow(QMainWindow):
                         y,
                         *dialog.names(),
                         pending_id=annotation.id,
+                        category_id=dialog.category_id(),
                     )
             elif dialog.deleted and annotation:
                 self.repository.delete(annotation.id)
             elif getattr(dialog, "unknown", False):
                 self.repository.create_pending(self.current_path, footage_date, x, y)
             elif annotation:
-                self.repository.edit(annotation.id, *dialog.names())
+                self.repository.edit(
+                    annotation.id, *dialog.names(), category_id=dialog.category_id()
+                )
             else:
                 value = self.footage_date.date()
                 footage_date = date(value.year(), value.month(), value.day())
-                self.repository.create(self.current_path, footage_date, x, y, *dialog.names())
+                self.repository.create(
+                    self.current_path,
+                    footage_date,
+                    x,
+                    y,
+                    *dialog.names(),
+                    category_id=dialog.category_id(),
+                )
             self.pending = self.repository.pending_identifications(self.current_path)
             self.annotations = self.repository.identifications(self.current_path)
             self.populate_current()

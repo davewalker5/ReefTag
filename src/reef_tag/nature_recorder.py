@@ -29,6 +29,7 @@ class _Species:
     id: int
     common_name: str
     scientific_name: str
+    category_name: str | None = None
 
 
 def parse_date(value: str) -> date:
@@ -77,6 +78,33 @@ def _named_id(connection: sqlite3.Connection, table: str, name: str) -> int:
     return matches[0]["Id"]
 
 
+def _ensure_category(connection: sqlite3.Connection, name: str, stamp: str) -> int:
+    """Reuse a unique case-insensitive category or create it with audit fields.
+
+    :param connection: Destination connection inside the transfer transaction.
+    :param name: Source category name.
+    :param stamp: Current date at midnight for audit fields.
+    :return: Destination category ID.
+    :raises ValueError: If multiple destination categories match the name.
+    """
+    matches = [
+        row["Id"]
+        for row in connection.execute("SELECT Id, Name FROM Categories")
+        if (row["Name"] or "").casefold() == name.casefold()
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous category mapping for {name!r}.")
+    if matches:
+        return matches[0]
+    cursor = connection.execute(
+        "INSERT INTO Categories (Name, Created_By, Updated_By, Date_Created, Date_Updated) "
+        "VALUES (?, 1, 1, ?, ?)",
+        (name, stamp, stamp),
+    )
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
+
+
 def _match_species(source: _Species, targets: list[_Species]) -> int | None:
     """Match common name first, then scientific name.
 
@@ -120,11 +148,18 @@ def transfer(
     if reef_tag_path.resolve() == nature_recorder_path.resolve():
         raise ValueError("Source and destination must be different database files.")
     with closing(_open_database(reef_tag_path, "ro")) as source:
+        # Older source databases predate categories; preserve their Fish-only transfer.
+        has_categories = any(
+            row["name"] == "CategoryId" for row in source.execute("PRAGMA table_info(SPECIES)")
+        )
+        category_column = "c.Name" if has_categories else "'Fish'"
+        category_join = "LEFT JOIN CATEGORY c ON c.Id=s.CategoryId" if has_categories else ""
         rows = source.execute(
-            """SELECT DISTINCT s.Id, s.CommonName, s.ScientificName
+            f"""SELECT DISTINCT s.Id, s.CommonName, s.ScientificName, {category_column}
                FROM SPECIES s
                JOIN IDENTIFICATION i ON i.SpeciesId = s.Id
                JOIN IMAGE im ON im.Id = i.ImageId
+               {category_join}
                WHERE substr(im.Date, 1, 10) = ? ORDER BY s.Id""",
             (selected_date,),
         ).fetchall()
@@ -144,7 +179,6 @@ def transfer(
             for row in species:
                 if _match_species(row, unique_species) is None:
                     unique_species.append(row)
-            category_id = _named_id(destination, "Categories", "Fish") if None in mappings else None
             stamp = f"{date.today().isoformat()} 00:00:00"
             created_species = created_sightings = skipped = 0
             for row, species_id in zip(species, mappings, strict=True):
@@ -152,6 +186,12 @@ def transfer(
                     # Recheck against inserted rows for case-only aliases in the source catalogue.
                     species_id = _match_species(row, targets)
                 if species_id is None:
+                    if not row.category_name:
+                        raise ValueError(
+                            f"Select a category for {row.common_name!r} before transferring "
+                            "a new species."
+                        )
+                    category_id = _ensure_category(destination, row.category_name, stamp)
                     cursor = destination.execute(
                         """INSERT INTO Species
                            (CategoryId, Name, Scientific_Name, Created_By, Updated_By,
