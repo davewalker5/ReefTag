@@ -28,6 +28,7 @@ It is manually operated, rather than an automated classifier, with the user maki
 - **Find previous observations** — filter images by an identified species and revisit or revise saved annotations
 - **Record footage dates** — use folder defaults or set dates for individual images
 - **Preserve and recover work** — save observations in SQLite, restore your working session and reconnect image paths after folders move
+- **Import and export observations** — exchange identifications and unknown markers as CSV using the File menu, with duplicate detection on import
 - **Transfer to Nature Recorder** — transfer categorised species and dated sightings for subsequent analysis and reporting
 
 ### How It Works
@@ -45,6 +46,24 @@ Identified fish appear as numbered markers, while unidentified fish appear as qu
 Observations are stored in a local SQLite database, allowing previously catalogued images and species to be revisited in subsequent sessions.
 
 When ready, identified species and sightings can be transferred to _Nature Recorder_ using a separate command-line tool.
+
+### CSV Import and Export
+
+Use **File → Export** to save identifications and unknown markers for the current folder.
+The export includes saved records for that folder, even if their images are currently missing
+from disk; subfolders and species filters do not change its scope. Further Examination is
+written as `0` or `1`, and image names contain their full stored paths.
+
+Use **File → Import** to load a previously exported CSV, with or without a folder open.
+Exact marker duplicates are skipped, including duplicates within the file. Existing image
+dates and species catalogue details are retained; new species and categories are created
+as needed. Imported examination flags are merged, and unknown markers always flag their image.
+Image paths need not exist on this computer: **Tools → Check Image Paths** can reconnect them.
+
+Imports preserve identification numbers. If a number already belongs to a different position
+in the same image, species names conflict with the catalogue, or a row is invalid, the entire
+import is cancelled without saving changes. The error identifies the CSV line where possible.
+Completion dialogs show image, identification, unknown marker and duplicate counts.
 
 ### Design Philosophy
 

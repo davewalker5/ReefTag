@@ -1,5 +1,6 @@
 """Folder browsing, footage dates and annotation workflow coordination."""
 
+import csv
 import logging
 import sqlite3
 from datetime import date
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from reef_tag.data_transfer import export_csv, folder_records, import_csv
 from reef_tag.files import discover_images
 from reef_tag.models import Identification, PendingIdentification
 from reef_tag.preferences import Preferences, PreviewSettings
@@ -92,6 +94,12 @@ class MainWindow(QMainWindow):
         )
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.resize(1250, 800)
+        file_menu = self.menuBar().addMenu("File")
+        self.import_action = file_menu.addAction("Import")
+        self.import_action.triggered.connect(self.import_data)
+        self.export_action = file_menu.addAction("Export")
+        self.export_action.setEnabled(False)
+        self.export_action.triggered.connect(self.export_data)
         tools_menu = self.menuBar().addMenu("Tools")
         tools_menu.addAction("Manage Categories").triggered.connect(self.edit_categories)
         self.set_default_date_action = tools_menu.addAction("Set Default Date")
@@ -269,6 +277,7 @@ class MainWindow(QMainWindow):
             return
         self.folder_default_date = default_date
         self.set_default_date_action.setEnabled(True)
+        self.export_action.setEnabled(True)
         self.folder = folder
         self.folder_text.setText(str(folder))
         self.refresh.setEnabled(True)
@@ -382,6 +391,50 @@ class MainWindow(QMainWindow):
             )
             cell.setToolTip(description)
             cell.setData(Qt.ItemDataRole.AccessibleTextRole, description)
+
+    def export_data(self) -> None:
+        """Export saved observations for the active folder after choosing a destination."""
+        if self.folder is None:
+            return
+        try:
+            records = folder_records(self.repository, self.folder)
+            if not records:
+                QMessageBox.warning(
+                    self, "Export", "No identifications or unknown markers to export."
+                )
+                return
+            filename, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export observations",
+                str(self.folder / "observations.csv"),
+                "CSV files (*.csv)",
+            )
+            if not filename:
+                return
+            summary = export_csv(Path(filename), records)
+        except (OSError, sqlite3.Error, csv.Error, UnicodeError) as error:
+            self.report_error(f"Cannot export observations: {error}")
+            return
+        QMessageBox.information(self, "Export complete", summary.description())
+
+    def import_data(self) -> None:
+        """Import a CSV and refresh the catalogue, folder indicators and current markers."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import observations", str(self.folder or Path.home()), "CSV files (*.csv)"
+        )
+        if not filename:
+            return
+        try:
+            summary = import_csv(self.repository, Path(filename))
+        except (OSError, ValueError, sqlite3.Error, csv.Error, UnicodeError) as error:
+            self.report_error(f"Cannot import observations: {error}")
+            return
+        try:
+            self.reload_catalogue()
+            self.refresh_folder()
+        except sqlite3.Error as error:
+            self.report_error(f"Import completed, but the display could not be refreshed: {error}")
+        QMessageBox.information(self, "Import complete", summary.description())
 
     def edit_categories(self) -> None:
         """Open category maintenance."""
