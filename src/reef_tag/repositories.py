@@ -10,6 +10,7 @@ from reef_tag.models import (
     ImagePathChange,
     PendingIdentification,
     Species,
+    SpeciesImage,
 )
 
 
@@ -67,6 +68,33 @@ class Repository:
             "SELECT Date FROM IMAGE WHERE Name=?", (image_identity(path),)
         ).fetchone()
         return date.fromisoformat(row[0]) if row else None
+
+    def identified_species(self) -> list[Species]:
+        """Return only catalogue entries with saved identifications, ordered by name."""
+        return [
+            Species(*row)
+            for row in self.connection.execute(
+                "SELECT s.id, s.CommonName, s.ScientificName, s.CategoryId FROM SPECIES s "
+                "WHERE EXISTS (SELECT 1 FROM IDENTIFICATION i WHERE i.SpeciesId=s.id) "
+                "ORDER BY s.CommonName COLLATE NOCASE, s.id"
+            )
+        ]
+
+    def images_for_species(self, species_id: int) -> list[SpeciesImage]:
+        """Find distinct images database-wide without changing stored data.
+
+        :param species_id: Existing catalogue identifier.
+        :return: Images with matching identification counts and original metadata.
+        """
+        return [
+            SpeciesImage(*row)
+            for row in self.connection.execute(
+                "SELECT m.id, m.Name, m.Date, COUNT(i.id) FROM IMAGE m "
+                "JOIN IDENTIFICATION i ON i.ImageId=m.id WHERE i.SpeciesId=? "
+                "GROUP BY m.id, m.Name, m.Date ORDER BY m.Date, m.Name, m.id",
+                (species_id,),
+            )
+        ]
 
     def tagged_image_counts(self) -> dict[str, int]:
         """Return annotation counts by stored image path, excluding untagged images."""

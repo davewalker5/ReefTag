@@ -40,6 +40,7 @@ from reef_tag.ui.category_dialog import CategoriesDialog, SpeciesMaintenanceDial
 from reef_tag.ui.folder_mapping_dialog import check_image_paths
 from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
 from reef_tag.ui.species_dialog import SpeciesDialog
+from reef_tag.ui.species_search_dialog import SpeciesSearchDialog
 
 LOGGER = logging.getLogger(__name__)
 ICON_PATH = Path(__file__).parents[1] / "resources" / "reeftag.png"
@@ -100,6 +101,9 @@ class MainWindow(QMainWindow):
         self.export_action = file_menu.addAction("Export")
         self.export_action.setEnabled(False)
         self.export_action.triggered.connect(self.export_data)
+        edit_menu = self.menuBar().addMenu("Edit")
+        self.find_species_action = edit_menu.addAction("Find Species")
+        self.find_species_action.triggered.connect(self.find_species)
         tools_menu = self.menuBar().addMenu("Tools")
         tools_menu.addAction("Manage Categories").triggered.connect(self.edit_categories)
         self.set_default_date_action = tools_menu.addAction("Set Default Date")
@@ -232,6 +236,15 @@ class MainWindow(QMainWindow):
         self.reload_catalogue()
         self.statusBar().showMessage("Choose a folder to begin.")
         self.restore_folder()
+
+    def find_species(self) -> None:
+        """Open a read-only species search independently of the active folder."""
+        try:
+            dialog = SpeciesSearchDialog(self.repository, self)
+        except sqlite3.Error as error:
+            self.report_error(f"Could not load identified species: {error}")
+            return
+        dialog.exec()
 
     def check_image_paths(self) -> None:
         """Repeat folder recovery and refresh displayed annotations after a confirmed mapping."""
