@@ -1,5 +1,6 @@
 """Transactional image, species and annotation operations."""
 
+import math
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -9,6 +10,7 @@ from reef_tag.models import (
     Folder,
     Identification,
     ImagePathChange,
+    Location,
     PendingIdentification,
     Species,
     SpeciesImage,
@@ -506,3 +508,56 @@ class Repository:
                 != 1
             ):
                 raise ValueError("This species no longer exists.")
+
+    def locations(self) -> list[Location]:
+        """Return geographical locations ordered by name, region and country."""
+        return [
+            Location(*row)
+            for row in self.connection.execute(
+                "SELECT Id, Name, Region, Country, Latitude, Longitude FROM LOCATION "
+                "ORDER BY Name COLLATE NOCASE, Region COLLATE NOCASE, Country COLLATE NOCASE, Id"
+            )
+        ]
+
+    def save_location(
+        self,
+        name: str,
+        region: str,
+        country: str,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        location_id: int | None = None,
+    ) -> None:
+        """Create or update a location atomically after validating its fields.
+
+        :param name: Required location name.
+        :param region: Required administrative region.
+        :param country: Required country.
+        :param latitude: Optional decimal degrees in [-90, 90].
+        :param longitude: Optional decimal degrees in [-180, 180].
+        :param location_id: Existing record ID, or None to create a record.
+        :raises ValueError: If fields are invalid or the record no longer exists.
+        """
+        name, region, country = name.strip(), region.strip(), country.strip()
+        for label, value in (("name", name), ("region", region), ("country", country)):
+            if not value:
+                raise ValueError(f"Enter a location {label}.")
+        for label, value, limit in (("Latitude", latitude, 90), ("Longitude", longitude, 180)):
+            if value is not None and (not math.isfinite(value) or not -limit <= value <= limit):
+                raise ValueError(f"{label} must be between {-limit} and {limit} degrees.")
+        values = (name, region, country, latitude, longitude)
+        with self.connection:
+            if location_id is None:
+                self.connection.execute(
+                    "INSERT INTO LOCATION (Name, Region, Country, Latitude, Longitude) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    values,
+                )
+            else:
+                cursor = self.connection.execute(
+                    "UPDATE LOCATION SET Name=?, Region=?, Country=?, Latitude=?, Longitude=? "
+                    "WHERE Id=?",
+                    (*values, location_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("This location no longer exists.")

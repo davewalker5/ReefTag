@@ -26,10 +26,11 @@ def test_initial_migration_and_repeat_startup(tmp_path: Path) -> None:
         "0003_pending_identification",
         "0004_species_categories",
         "0005_folder_defaults",
+        "0006_locations",
     }
     connection.close()
     connection = db.connect(path)
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 5
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 6
     assert len(Repository(connection).identifications(tmp_path / "fish.png")) == 1
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     connection.close()
@@ -54,7 +55,7 @@ def test_initial_rollback_and_reapply(tmp_path: Path) -> None:
         assert not tables.intersection({"IMAGE", "SPECIES", "IDENTIFICATION"})
     connection = db.connect(path)
     assert connection.execute("SELECT COUNT(*) FROM IDENTIFICATION").fetchone()[0] == 0
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 5
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 6
     connection.close()
 
 
@@ -74,7 +75,7 @@ def test_pending_upgrade_and_failed_migration(
     )
     connection = db.connect(path)
     assert connection.execute("SELECT Notes FROM IMAGE").fetchone()[0] is None
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 6
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 7
     connection.close()
     (migration_path / "0004_test_failure.sql").write_text(
         "-- depends: 0003_test_upgrade\nCREATE TABLE partial_change (id INTEGER);\n"
@@ -87,7 +88,7 @@ def test_pending_upgrade_and_failed_migration(
         connection.execute("SELECT name FROM sqlite_master WHERE name='partial_change'").fetchone()
         is None
     )
-    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 6
+    assert connection.execute("SELECT COUNT(*) FROM _yoyo_migration").fetchone()[0] == 7
     assert connection.execute("SELECT COUNT(*) FROM IDENTIFICATION").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM yoyo_lock").fetchone()[0] == 0
     connection.close()

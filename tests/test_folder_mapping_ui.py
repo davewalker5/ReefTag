@@ -151,10 +151,11 @@ def test_menu_and_active_default_refresh(application, repository, tmp_path, monk
     assert [action.text() for action in tools.actions()] == [
         "Manage Categories",
         "Manage Folders",
+        "Manage Locations",
         "",
         "Check Image Paths",
     ]
-    assert tools.actions()[2].isSeparator()
+    assert tools.actions()[3].isSeparator()
     assert window.manage_folders_action.isEnabled()
     repository.save_folder_date(tmp_path, DAY)
     window.open_folder(tmp_path)

@@ -42,6 +42,7 @@ from reef_tag.ui.folder_mapping_dialog import (
     pick_folder_date,
 )
 from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
+from reef_tag.ui.location_dialog import LocationsDialog
 from reef_tag.ui.species_dialog import SpeciesDialog
 from reef_tag.ui.species_search_dialog import SpeciesSearchDialog
 
@@ -111,6 +112,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("Manage Categories").triggered.connect(self.edit_categories)
         self.manage_folders_action = tools_menu.addAction("Manage Folders")
         self.manage_folders_action.triggered.connect(self.manage_folders)
+        self.manage_locations_action = tools_menu.addAction("Manage Locations")
+        self.manage_locations_action.triggered.connect(self.manage_locations)
         tools_menu.addSeparator()
         check_paths = tools_menu.addAction("Check Image Paths")
         check_paths.triggered.connect(self.check_image_paths)
@@ -430,6 +433,13 @@ class MainWindow(QMainWindow):
         except sqlite3.Error as error:
             self.report_error(f"Import completed, but the display could not be refreshed: {error}")
         QMessageBox.information(self, "Import complete", summary.description())
+
+    def manage_locations(self) -> None:
+        """Open geographical location maintenance."""
+        try:
+            LocationsDialog(self.repository, self).exec()
+        except sqlite3.Error as error:
+            self.report_error(f"Cannot load locations: {error}")
 
     def edit_categories(self) -> None:
         """Open category maintenance."""
