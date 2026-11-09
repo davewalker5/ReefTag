@@ -65,7 +65,7 @@ class FolderManagementDialog(QDialog):
         self.repository = repository
         self.current_folder = current_folder.resolve() if current_folder is not None else None
         self.changed = False
-        self.setWindowTitle("Folder Management")
+        self.setWindowTitle("Folders")
         self.setModal(True)
         self.resize(1100, 460)
         layout = QVBoxLayout(self)

@@ -5,7 +5,7 @@ import sqlite3
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QDialogButtonBox,
+    QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QMessageBox,
@@ -44,12 +44,16 @@ class CategoriesDialog(QDialog):
         self.table.setColumnWidth(2, 44)
         self.table.cellDoubleClicked.connect(self.edit_category)
         layout.addWidget(self.table)
-        add = QPushButton("Add Category")
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        add = QPushButton("Add")
         add.clicked.connect(lambda: self.edit_category(-1, 0))
-        layout.addWidget(add)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
-        buttons.accepted.connect(self.accept)
-        layout.addWidget(buttons)
+        buttons.addWidget(add)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
         self.reload()
 
     def reload(self) -> None:
