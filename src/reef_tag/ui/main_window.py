@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDateEdit,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -37,7 +36,11 @@ from reef_tag.models import Identification, PendingIdentification
 from reef_tag.preferences import Preferences, PreviewSettings
 from reef_tag.repositories import Repository, image_identity
 from reef_tag.ui.category_dialog import CategoriesDialog, SpeciesMaintenanceDialog
-from reef_tag.ui.folder_mapping_dialog import check_image_paths
+from reef_tag.ui.folder_mapping_dialog import (
+    FolderManagementDialog,
+    check_image_paths,
+    pick_folder_date,
+)
 from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
 from reef_tag.ui.species_dialog import SpeciesDialog
 from reef_tag.ui.species_search_dialog import SpeciesSearchDialog
@@ -106,9 +109,9 @@ class MainWindow(QMainWindow):
         self.find_species_action.triggered.connect(self.find_species)
         tools_menu = self.menuBar().addMenu("Tools")
         tools_menu.addAction("Manage Categories").triggered.connect(self.edit_categories)
-        self.set_default_date_action = tools_menu.addAction("Set Default Date")
-        self.set_default_date_action.setEnabled(False)
-        self.set_default_date_action.triggered.connect(self.set_default_date)
+        self.manage_folders_action = tools_menu.addAction("Manage Folders")
+        self.manage_folders_action.triggered.connect(self.manage_folders)
+        tools_menu.addSeparator()
         check_paths = tools_menu.addAction("Check Image Paths")
         check_paths.triggered.connect(self.check_image_paths)
         splitter = QSplitter()
@@ -248,15 +251,35 @@ class MainWindow(QMainWindow):
 
     def check_image_paths(self) -> None:
         """Repeat folder recovery and refresh displayed annotations after a confirmed mapping."""
-        if not check_image_paths(self.repository, self, manual=True, preferences=self.preferences):
+        if not check_image_paths(
+            self.repository,
+            self,
+            manual=True,
+            preferences=self.preferences,
+            on_folder_changed=self.open_folder,
+        ):
             return
         if self.folder is not None and self.folder.is_dir():
+            self.folder_default_date = self.repository.folder_date(self.folder)
             self.refresh_folder()
         else:
             self.paths = []
             self.files.setRowCount(0)
             self.clear_image()
             self.statusBar().showMessage("Image paths updated. Choose a folder to continue.")
+
+    def manage_folders(self) -> None:
+        """Manage all saved directories and refresh the current folder's default and images."""
+        try:
+            dialog = FolderManagementDialog(self.repository, self, self.folder)
+            dialog.exec()
+            if dialog.changed:
+                if dialog.current_folder is not None:
+                    self.open_folder(dialog.current_folder)
+                if self.current_path is None:
+                    self.show_footage_date(self.folder_default_date)
+        except (OSError, sqlite3.Error) as error:
+            self.report_error(f"Cannot manage folders: {error}")
 
     def restore_folder(self) -> None:
         """Reopen the last folder if present; preference failures leave the app usable."""
@@ -289,7 +312,6 @@ class MainWindow(QMainWindow):
             self.report_error(f"Cannot save or read the folder default date: {error}")
             return
         self.folder_default_date = default_date
-        self.set_default_date_action.setEnabled(True)
         self.export_action.setEnabled(True)
         self.folder = folder
         self.folder_text.setText(str(folder))
@@ -298,47 +320,7 @@ class MainWindow(QMainWindow):
 
     def prompt_default_date(self, folder: Path, initial: date) -> date | None:
         """Ask for a folder default; cancellation leaves the selected folder unchanged."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Set Default Date")
-        layout = QVBoxLayout(dialog)
-        label = QLabel(f"Default footage date for {folder}")
-        label.setTextFormat(Qt.TextFormat.PlainText)
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        picker = QDateEdit(QDate(initial.year, initial.month, initial.day))
-        picker.setCalendarPopup(True)
-        picker.setDisplayFormat("dd/MM/yyyy")
-        layout.addWidget(picker)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-        return picker.date().toPython()
-
-    def set_default_date(self) -> None:
-        """Change the folder default without rewriting recorded image dates."""
-        if self.folder is None:
-            return
-        selected = self.prompt_default_date(self.folder, self.folder_default_date or date.today())
-        if selected is None:
-            return
-        try:
-            self.repository.save_folder_date(self.folder, selected)
-        except (OSError, sqlite3.Error) as error:
-            self.report_error(f"Cannot save the folder default date: {error}")
-            return
-        self.folder_default_date = selected
-        if self.current_path is None:
-            self.show_footage_date(selected)
-        else:
-            try:
-                self.show_footage_date(self.repository.image_date(self.current_path) or selected)
-            except sqlite3.Error as error:
-                self.report_error(f"Cannot read the image date: {error}")
+        return pick_folder_date(self, folder, initial)
 
     def show_footage_date(self, value: date | None) -> None:
         """Display a date or an empty field without triggering a database write."""

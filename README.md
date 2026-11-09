@@ -28,6 +28,7 @@ It is manually operated, rather than an automated classifier, with the user maki
 - **Find previous observations** — filter images by an identified species and revisit or revise saved annotations
 - **Species Search** — search for identified species across the database and browse matching images
 - **Record footage dates** — use folder defaults or set dates for individual images
+- **Folder management** — check folder and image availability and remap relocated folders
 - **Preserve and recover work** — save observations in SQLite, restore your working session and reconnect image paths after folders move
 - **Import and export observations** — exchange identifications and unknown markers as CSV using the File menu, with duplicate detection on import
 - **Transfer to Nature Recorder** — transfer categorised species and dated sightings for subsequent analysis and reporting

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from reef_tag.models import (
     Category,
+    Folder,
     Identification,
     ImagePathChange,
     PendingIdentification,
@@ -37,6 +38,40 @@ class Repository:
     def image_paths(self) -> dict[int, str]:
         """Return stored image paths keyed by ID in a single query."""
         return dict(self.connection.execute(f"SELECT id, Name FROM {IMAGE_PATHS}"))
+
+    def folders(self) -> tuple[Folder, ...]:
+        """Return every saved folder, including folders without image records."""
+        paths = self.image_paths()
+        images: dict[int, dict[int, str]] = {}
+        for image_id, folder_id in self.connection.execute("SELECT id, FolderId FROM IMAGE"):
+            images.setdefault(folder_id, {})[image_id] = paths[image_id]
+        return tuple(
+            Folder(folder_id, Path(path), date.fromisoformat(value[:10]), images.get(folder_id, {}))
+            for folder_id, path, value in self.connection.execute(
+                "SELECT Id, Path, Date FROM FOLDER ORDER BY Path"
+            )
+        )
+
+    def relocate_folder(self, folder: Folder, destination: Path) -> None:
+        """Atomically move a folder's images and default, retaining destination defaults.
+
+        :param folder: Snapshot validated by the caller.
+        :param destination: Validated replacement directory.
+        :raises ValueError: If the source changed since validation.
+        :raises sqlite3.Error: If paths collide; all changes are rolled back.
+        """
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            current = next((item for item in self.folders() if item.id == folder.id), None)
+            if current != folder:
+                raise ValueError("The folder changed. Close and reopen Folder Management.")
+            target_id = self._folder_id(destination, folder.default_date)
+            if target_id == folder.id:
+                return
+            self.connection.execute(
+                "UPDATE IMAGE SET FolderId=? WHERE FolderId=?", (target_id, folder.id)
+            )
+            self.connection.execute("DELETE FROM FOLDER WHERE Id=?", (folder.id,))
 
     def update_image_paths(self, changes: tuple[ImagePathChange, ...]) -> None:
         """Atomically apply confirmed paths without changing image IDs or metadata.
