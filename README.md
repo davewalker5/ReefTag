@@ -21,17 +21,18 @@ It is manually operated, rather than an automated classifier, with the user maki
 
 ### Features
 
-- **Browse and examine photographs** — navigate PNG and JPEG images, adjust brightness, zoom up to 400% and pan using scrollbars or drag controls without changing the originals
-- **Identify and annotate fish** — mark individual fish at their original image positions, including multiple individuals of the same species
-- **Return to unknown fish** — mark unidentified individuals with question marks and flag images for further examination
-- **Maintain a species catalogue** — reuse common and scientific names, edit species details and organise species into categories
-- **Find previous observations** — filter images by an identified species and revisit or revise saved annotations
-- **Species Search** — search for identified species across the database and browse matching images
-- **Record footage dates** — use folder defaults or set dates for individual images
-- **Folder management** — check folder and image availability and remap relocated folders
-- **Preserve and recover work** — save observations in SQLite, restore your working session and reconnect image paths after folders move
-- **Import and export observations** — exchange identifications and unknown markers as CSV using the File menu, with duplicate detection on import
-- **Transfer to Nature Recorder** — transfer categorised species and dated sightings for subsequent analysis and reporting
+| Feature                        | Description                                                                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Browse Photographs             | Browse PNG and JPEG images in the currently selected folder, adjust brightness, zoom up to 400% and pan using scrollbars or drag controls without changing the originals |
+| Point-and-Click Annotations    | Mark individual animals at their image positions using a point-and-click interface                                                                                       |
+| Flag Unknown Animals           | Mark unidentified individuals and flag images for further examination                                                                                                    |
+| Species Catalogue              | Maintain a species catalogue, holding the common and scientific names for each species and organising species into categories                                            |
+| Species Filter                 | Filter images in the currently selected folder by an identified species to view or revise saved annotations                                                              |
+| Species Search                 | Search for identified species across the database and browse matching images                                                                                             |
+| Geographical Locations         | Maintain a catalogue of observation locations with names, regions, countries and optional latitude and longitude                                                         |
+| Folder Management              | Manage folder paths, footage dates and associated geographical locations, check image availability and remap folders that have been moved                                |
+| Import and Export Observations | Import/export species identifications in CSV format                                                                                                                      |
+| Nature Recorder Tranfer        | Transfer sightings from the _ReefTag_ database to _Nature Recorder_                                                                                                      |
 
 ### How It Works
 
@@ -39,15 +40,11 @@ The workflow is as follows:
 
 1. Select a folder containing underwater photographs and set its footage date
 2. Choose an image and examine it, adjusting brightness or zoom as necessary
-3. Click on a fish and select an existing species or enter its common and scientific names, optionally assigning a category
-4. If you cannot identify a fish yet, mark it as unknown and return to it later
-5. Repeat for other fish, then move on to the next photograph
+3. Click on an animal and select an existing species or enter its common and scientific names, optionally assigning a category
+4. If you cannot identify the animal yet, mark it as unknown and return to it later
+5. Repeat for other animals, then move on to the next photograph
 
-Identified fish appear as numbered markers, while unidentified fish appear as question marks. The underlying photograph remains unchanged, and marker coordinates are retained relative to the original image.
-
-Observations are stored in a local SQLite database, allowing previously catalogued images and species to be revisited in subsequent sessions.
-
-When ready, identified species and sightings can be transferred to _Nature Recorder_ using a separate command-line tool.
+Identified animals are annotated with numbered markers, while those that are unidentified are marked with question marks. The underlying photograph remains unchanged, and marker coordinates are retained relative to the original image.
 
 ### Design Philosophy
 
