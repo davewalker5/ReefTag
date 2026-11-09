@@ -49,7 +49,7 @@ class CategoriesDialog(QDialog):
         add = QPushButton("Add")
         add.clicked.connect(lambda: self.edit_category(-1, 0))
         buttons.addWidget(add)
-        ok = QPushButton("OK")
+        ok = QPushButton("Close")
         ok.setDefault(True)
         ok.clicked.connect(self.accept)
         buttons.addWidget(ok)
