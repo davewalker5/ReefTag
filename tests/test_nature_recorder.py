@@ -35,7 +35,6 @@ def databases(tmp_path: Path) -> tuple[Path, Path]:
     """Create source annotations and a destination using the brief's exact DDL."""
     source = tmp_path / "reef.db"
     target = tmp_path / "nature.db"
-    root = Path(__file__).resolve().parents[1]
     connection = connect(source)
     with connection:
         connection.executescript("""
@@ -53,11 +52,9 @@ def databases(tmp_path: Path) -> tuple[Path, Path]:
                 (3,2,2,1,0,0), (4,3,3,1,0,0);
         """)
     connection.close()
-    brief = root / "docs/Project Briefs/Project Brief - Nature Recorder Data Transfer.md"
-    schemas = brief.read_text().split("```sql\n")[1:]
+    schema = Path(__file__).parent / "fixtures" / "nature_recorder.sql"
     with sqlite3.connect(target) as connection:
-        for schema in schemas:
-            connection.executescript(schema.split("```")[0])
+        connection.executescript(schema.read_text())
         connection.executescript("""
             INSERT INTO Categories (Id, Name) VALUES (1, 'Fish'), (2, 'Other');
             INSERT INTO Locations (Id, Name) VALUES (1, 'Reef'), (2, 'Elsewhere');

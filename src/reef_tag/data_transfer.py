@@ -1,15 +1,22 @@
 """CSV interchange for saved observations, independent of the desktop interface."""
 
 import csv
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from reef_tag.repositories import IMAGE_PATHS, Repository
+from reef_tag.repositories import Repository
 
 COLUMNS = (
     "Date",
+    "Folder",
+    "Location",
+    "Region",
+    "Country",
+    "Latitude",
+    "Longitude",
     "Image",
     "Further Examination",
     "Type",
@@ -27,6 +34,12 @@ class TransferRecord:
     """A validated CSV observation using original-image integer pixel coordinates."""
 
     footage_date: str
+    folder: str
+    location: str
+    region: str
+    country: str
+    latitude: float | None
+    longitude: float | None
     image: str
     examination: bool
     kind: str
@@ -63,18 +76,25 @@ def folder_records(repository: Repository, folder: Path) -> list[TransferRecord]
     :return: Records in image, type and marker order.
     """
     rows = repository.connection.execute(
-        f"""SELECT m.Date, m.Name, m.FurtherExamination, 'IDENTIFICATION',
-                  i.Number, i.X, i.Y, COALESCE(c.Name, ''), s.CommonName, s.ScientificName
-           FROM {IMAGE_PATHS} m JOIN IDENTIFICATION i ON i.ImageId=m.id
-           JOIN SPECIES s ON s.id=i.SpeciesId LEFT JOIN CATEGORY c ON c.Id=s.CategoryId
-           UNION ALL
-           SELECT m.Date, m.Name, m.FurtherExamination, 'UNKNOWN',
-                  NULL, p.X, p.Y, '', '', ''
-           FROM {IMAGE_PATHS} m JOIN PENDING_IDENTIFICATION p ON p.ImageId=m.id
-           ORDER BY 2, 4, 5, 6, 7"""
+        """WITH markers AS (
+               SELECT i.ImageId, 'IDENTIFICATION' AS Kind, i.Number, i.X, i.Y,
+                      COALESCE(c.Name, '') AS Category, s.CommonName, s.ScientificName
+               FROM IDENTIFICATION i JOIN SPECIES s ON s.Id=i.SpeciesId
+               LEFT JOIN CATEGORY c ON c.Id=s.CategoryId
+               UNION ALL
+               SELECT p.ImageId, 'UNKNOWN', NULL, p.X, p.Y, '', '', ''
+               FROM PENDING_IDENTIFICATION p
+           )
+           SELECT SUBSTR(f.Date, 1, 10), f.Path, COALESCE(l.Name, ''),
+                  COALESCE(l.Region, ''), COALESCE(l.Country, ''), l.Latitude, l.Longitude,
+                  im.Name, im.FurtherExamination, m.Kind, m.Number, m.X, m.Y,
+                  m.Category, m.CommonName, m.ScientificName
+           FROM markers m JOIN IMAGE im ON im.Id=m.ImageId
+           JOIN FOLDER f ON f.Id=im.FolderId LEFT JOIN LOCATION l ON l.Id=f.LocationId
+           WHERE f.Path=? ORDER BY im.Name, m.Kind, m.Number, m.X, m.Y""",
+        (str(folder.resolve()),),
     )
-    folder = folder.resolve()
-    return [TransferRecord(*row) for row in rows if Path(row[1]).parent == folder]
+    return [TransferRecord(*row) for row in rows]
 
 
 def export_csv(path: Path, records: list[TransferRecord]) -> TransferSummary:
@@ -85,7 +105,7 @@ def export_csv(path: Path, records: list[TransferRecord]) -> TransferSummary:
     :return: Counts written to the CSV.
     :raises OSError: If the destination cannot be written.
     """
-    summary = TransferSummary(images=len({record.image for record in records}))
+    summary = TransferSummary(images=len({(record.folder, record.image) for record in records}))
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(COLUMNS)
@@ -93,6 +113,12 @@ def export_csv(path: Path, records: list[TransferRecord]) -> TransferSummary:
             writer.writerow(
                 (
                     record.footage_date,
+                    record.folder,
+                    record.location,
+                    record.region,
+                    record.country,
+                    record.latitude,
+                    record.longitude,
                     record.image,
                     int(record.examination),
                     record.kind,
@@ -111,15 +137,62 @@ def export_csv(path: Path, records: list[TransferRecord]) -> TransferSummary:
     return summary
 
 
+def _parse_coordinate(value: str, label: str, limit: int) -> float | None:
+    """Parse optional finite decimal degrees within the supplied geographical limit.
+
+    :param value: CSV cell, with a blank cell representing an absent coordinate.
+    :param label: Field name used in validation errors.
+    :param limit: Inclusive positive limit; the negative limit is also allowed.
+    :return: Coordinate or None for a blank cell.
+    :raises ValueError: If the cell is nonnumeric, nonfinite or out of range.
+    """
+    if not value.strip():
+        return None
+    try:
+        coordinate = float(value)
+    except ValueError as error:
+        raise ValueError(f"{label} must be a number in decimal degrees.") from error
+    if not math.isfinite(coordinate) or not -limit <= coordinate <= limit:
+        raise ValueError(f"{label} must be between {-limit} and {limit} degrees.")
+    return coordinate
+
+
 def _parse_record(values: list[str]) -> TransferRecord:
     """Validate one CSV row, raising ValueError for invalid fields."""
     if len(values) != len(COLUMNS):
         raise ValueError(f"Expected {len(COLUMNS)} columns.")
-    day, image, examination, kind, number, x, y, category, common, scientific = values
+    (
+        day,
+        folder,
+        location,
+        region,
+        country,
+        latitude,
+        longitude,
+        image,
+        examination,
+        kind,
+        number,
+        x,
+        y,
+        category,
+        common,
+        scientific,
+    ) = values
     if date.fromisoformat(day).isoformat() != day:
         raise ValueError("Date must use YYYY-MM-DD.")
-    if not image or not Path(image).is_absolute():
-        raise ValueError("Image must contain an absolute image path.")
+    if not folder.strip() or "\0" in folder or not Path(folder).is_absolute():
+        raise ValueError("Folder must contain an absolute folder path.")
+    if not image.strip() or image in {".", ".."} or any(char in image for char in "/\\\0"):
+        raise ValueError("Image must contain a filename only, without a folder path.")
+    location, region, country = location.strip(), region.strip(), country.strip()
+    parsed_latitude = _parse_coordinate(latitude, "Latitude", 90)
+    parsed_longitude = _parse_coordinate(longitude, "Longitude", 180)
+    if location:
+        if not region or not country:
+            raise ValueError("Locations require both Region and Country.")
+    elif region or country or latitude.strip() or longitude.strip():
+        raise ValueError("Location details require a Location name.")
     if examination not in ("0", "1"):
         raise ValueError("Further Examination must be 0 or 1.")
     if kind not in ("IDENTIFICATION", "UNKNOWN"):
@@ -135,17 +208,76 @@ def _parse_record(values: list[str]) -> TransferRecord:
     elif any((number, category, common, scientific)):
         raise ValueError("Unknown markers require blank number, category and species fields.")
     return TransferRecord(
-        day,
-        image,
-        examination == "1",
-        kind,
-        marker_number,
-        pixel_x,
-        pixel_y,
-        category.strip(),
-        common.strip(),
-        scientific.strip(),
+        footage_date=day,
+        folder=str(Path(folder).resolve()),
+        location=location,
+        region=region,
+        country=country,
+        latitude=parsed_latitude,
+        longitude=parsed_longitude,
+        image=image,
+        examination=examination == "1",
+        kind=kind,
+        number=marker_number,
+        x=pixel_x,
+        y=pixel_y,
+        category=category.strip(),
+        common_name=common.strip(),
+        scientific_name=scientific.strip(),
     )
+
+
+def _location_id(connection: sqlite3.Connection, record: TransferRecord) -> int | None:
+    """Reuse a unique name match unchanged or create a location within the import transaction.
+
+    :param connection: Destination connection owned by the outer import transaction.
+    :param record: Validated record with optional location details.
+    :return: Location ID, or None if the record has no location.
+    :raises ValueError: If several saved locations match the case-insensitive name.
+    """
+    if not record.location:
+        return None
+    matches = [
+        row[0]
+        for row in connection.execute("SELECT Id, Name FROM LOCATION")
+        if row[1].casefold() == record.location.casefold()
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous location name {record.location!r}.")
+    if matches:
+        return matches[0]
+    cursor = connection.execute(
+        "INSERT INTO LOCATION (Name, Region, Country, Latitude, Longitude) VALUES (?, ?, ?, ?, ?)",
+        (record.location, record.region, record.country, record.latitude, record.longitude),
+    )
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
+
+
+def _folder_id(connection: sqlite3.Connection, record: TransferRecord) -> int:
+    """Preserve saved folder metadata, filling only a missing location assignment.
+
+    :param connection: Destination connection owned by the outer import transaction.
+    :param record: Validated record with a resolved folder path and its metadata.
+    :return: Existing or newly created folder ID.
+    """
+    row = connection.execute(
+        "SELECT Id, LocationId FROM FOLDER WHERE Path=?", (record.folder,)
+    ).fetchone()
+    if row:
+        if row[1] is None and record.location:
+            connection.execute(
+                "UPDATE FOLDER SET LocationId=? WHERE Id=?",
+                (_location_id(connection, record), row[0]),
+            )
+        return row[0]
+    location_id = _location_id(connection, record)
+    cursor = connection.execute(
+        "INSERT INTO FOLDER (Path, Date, LocationId) VALUES (?, ?, ?)",
+        (record.folder, record.footage_date, location_id),
+    )
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _species_id(connection: sqlite3.Connection, record: TransferRecord) -> int:
@@ -174,10 +306,8 @@ def _species_id(connection: sqlite3.Connection, record: TransferRecord) -> int:
 
 def _import_record(connection: sqlite3.Connection, record: TransferRecord) -> bool:
     """Merge one observation and return whether a new marker was inserted."""
-    repository = Repository(connection)
-    folder_id, filename = repository._image_key(
-        Path(record.image), date.fromisoformat(record.footage_date)
-    )
+    folder_id = _folder_id(connection, record)
+    filename = record.image
     connection.execute(
         "INSERT INTO IMAGE (FolderId, Name, FurtherExamination) VALUES (?, ?, ?) "
         "ON CONFLICT(FolderId, Name) DO UPDATE SET "
@@ -221,7 +351,8 @@ def _import_record(connection: sqlite3.Connection, record: TransferRecord) -> bo
 def import_csv(repository: Repository, path: Path) -> TransferSummary:
     """Validate and import an entire CSV atomically, skipping exact marker duplicates.
 
-    Existing folder dates and species metadata are retained. Examination flags are merged.
+    Existing folder dates, assigned locations and shared metadata are retained. Missing
+    folder locations are filled from the file. Examination flags are merged.
 
     :param repository: Destination database.
     :param path: UTF-8 CSV previously exported by ReefTag.
@@ -231,11 +362,14 @@ def import_csv(repository: Repository, path: Path) -> TransferSummary:
     :raises sqlite3.Error: If persistence fails; all writes are rolled back.
     """
     summary = TransferSummary()
-    images: set[str] = set()
+    images: set[tuple[str, str]] = set()
     with path.open(encoding="utf-8-sig", newline="") as stream, repository.connection:
         reader = csv.reader(stream, strict=True)
         if next(reader, None) != list(COLUMNS):
-            raise ValueError("CSV columns do not match the ReefTag export format.")
+            raise ValueError(
+                "CSV columns do not match the current ReefTag export format. "
+                "Re-export using this version."
+            )
         repository.connection.execute("BEGIN IMMEDIATE")
         for values in reader:
             try:
@@ -245,7 +379,7 @@ def import_csv(repository: Repository, path: Path) -> TransferSummary:
                     continue
             except ValueError as error:
                 raise ValueError(f"CSV line {reader.line_num}: {error}") from error
-            images.add(record.image)
+            images.add((record.folder, record.image))
             if record.kind == "IDENTIFICATION":
                 summary.identifications += 1
             else:
