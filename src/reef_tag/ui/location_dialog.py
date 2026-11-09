@@ -118,6 +118,7 @@ class LocationsDialog(QDialog):
         add.clicked.connect(lambda: self.edit_location(-1, 0))
         actions.addWidget(add)
         close = QPushButton("Close")
+        close.setDefault(True)
         close.clicked.connect(self.reject)
         actions.addWidget(close)
         layout.addLayout(actions)
