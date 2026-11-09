@@ -9,15 +9,15 @@
 
 <img src="https://github.com/davewalker5/ReefTag/blob/main/diagrams/main-window.png" alt="ReefTag Main Window" width="100%">
 
-**ReefTag** is a Python desktop application for identifying, annotating and cataloguing marine wildlife in underwater photographs.
+_ReefTag_ is a Python desktop application for identifying, annotating and cataloguing marine wildlife in underwater photographs.
 
 Developed following a visit to the Maldives in October 2026, it is the latest in a series of small software projects inspired by the underwater photographs and video footage collected during the trip:
 
 - _ReefFrame_ enhances and processes underwater footage
 - _FishTrack_ explores the detection and tracking of fish within video sequences
-- _ReefTag_ provides a simple, interactive workspace for examining still images, identifying individual fish and building a reusable catalogue of the species encountered
+- _ReefTag_ provides a simple, interactive workspace for examining still images, identifying individual fish and building a catalogue of the species encountered
 
-It is manually operated, rather than an automated classifier, with the user making the identification and _ReefTag_ handling the annotation, organisation and persistence of the resulting data.
+_ReefTag_ is intended to be a small, practical cataloguing tool, supporting the process of examining photographs, making manual identifications and maintaining an organised record of what has been observed.
 
 ### Features
 
@@ -45,12 +45,6 @@ The workflow is as follows:
 5. Repeat for other animals, then move on to the next photograph
 
 Identified animals are annotated with numbered markers, while those that are unidentified are marked with question marks. The underlying photograph remains unchanged, and marker coordinates are retained relative to the original image.
-
-### Design Philosophy
-
-_ReefTag_ is intended to be a small, practical field-cataloguing tool, rather than a comprehensive marine biology or image-analysis platform.
-
-It does not attempt to recognise species automatically, validate taxonomic names against external databases or replace specialist identification resources. Instead, it supports the process of examining photographs, making identifications and maintaining an organised record of what has been observed.
 
 ## Getting Started
 
