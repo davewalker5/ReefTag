@@ -679,7 +679,7 @@ def test_folder_default_dates(
     monkeypatch.setattr(MainWindow, "prompt_default_date", choose_default)
     window.open_folder(folder)
     assert prompts == [folder]
-    assert preferences.folder_date(folder) == first
+    assert repository.folder_date(folder) == first
     assert window.footage_date.date().toPython() == first
     assert not window.footage_date.isEnabled()
     window.files.selectRow(0)
@@ -708,7 +708,7 @@ def test_folder_default_dates(
     other.mkdir()
     restarted.open_folder(other)
     assert restarted.folder == folder
-    assert preferences.folder_date(other) is None
+    assert repository.folder_date(other) is None
     restarted.close()
     connection.close()
 

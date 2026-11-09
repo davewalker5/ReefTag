@@ -232,16 +232,6 @@ class FolderMappingDialog(QDialog):
         state.selection = str(replacement.directory)
         self.changed = True
         self.show_candidate()
-        try:
-            self.preferences.map_folder_date(state.candidate.directory, replacement.directory)
-        except OSError as error:
-            LOGGER.exception("Cannot map folder default date")
-            QMessageBox.warning(
-                self,
-                "Folder default date not updated",
-                "Image paths were updated, but the folder default date could not be saved."
-                f"\n\n{error}",
-            )
 
 
 def check_image_paths(

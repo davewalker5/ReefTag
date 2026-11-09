@@ -1,0 +1,45 @@
+CREATE TABLE new_image (
+    id INTEGER PRIMARY KEY,
+    Name TEXT NOT NULL UNIQUE,
+    Date TEXT NOT NULL,
+    FurtherExamination INTEGER NOT NULL DEFAULT 0 CHECK (FurtherExamination IN (0, 1))
+);
+INSERT INTO new_image
+SELECT im.id, CASE WHEN f.Path='' THEN im.Name
+                  WHEN SUBSTR(f.Path, -1) IN ('/', char(92)) THEN f.Path || im.Name
+                  WHEN INSTR(f.Path, char(92))>0 AND INSTR(f.Path, '/')=0
+              THEN f.Path || char(92) || im.Name
+         ELSE f.Path || '/' || im.Name END, im.Date, im.FurtherExamination
+FROM IMAGE im JOIN FOLDER f ON f.Id=im.FolderId;
+CREATE TEMP TABLE saved_identifications AS SELECT * FROM IDENTIFICATION;
+CREATE TEMP TABLE saved_pending AS SELECT * FROM PENDING_IDENTIFICATION;
+DROP TABLE IDENTIFICATION;
+DROP TABLE PENDING_IDENTIFICATION;
+DROP TABLE IMAGE;
+ALTER TABLE new_image RENAME TO IMAGE;
+DROP TABLE FOLDER;
+CREATE TABLE IDENTIFICATION (
+    id INTEGER PRIMARY KEY,
+    ImageId INTEGER NOT NULL REFERENCES IMAGE(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    SpeciesId INTEGER NOT NULL REFERENCES SPECIES(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    Number INTEGER NOT NULL CHECK (Number > 0),
+    X INTEGER NOT NULL CHECK (X >= 0),
+    Y INTEGER NOT NULL CHECK (Y >= 0),
+    UNIQUE (ImageId, Number)
+);
+
+CREATE INDEX idx_identification_image ON IDENTIFICATION(ImageId);
+CREATE INDEX idx_identification_species ON IDENTIFICATION(SpeciesId);
+
+CREATE TABLE PENDING_IDENTIFICATION (
+    id INTEGER PRIMARY KEY,
+    ImageId INTEGER NOT NULL REFERENCES IMAGE(id),
+    X INTEGER NOT NULL CHECK (X >= 0),
+    Y INTEGER NOT NULL CHECK (Y >= 0)
+);
+CREATE INDEX pending_identification_image ON PENDING_IDENTIFICATION(ImageId);
+
+INSERT INTO IDENTIFICATION SELECT * FROM saved_identifications;
+INSERT INTO PENDING_IDENTIFICATION SELECT * FROM saved_pending;
+DROP TABLE saved_identifications;
+DROP TABLE saved_pending;

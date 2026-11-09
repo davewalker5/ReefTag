@@ -54,15 +54,18 @@ def test_discovery_empty_database(repository: Repository) -> None:
     assert result.candidates == result.issues == ()
 
 
-@pytest.mark.parametrize("name", ["", " ", "frame.png", "bad\0path", "/", "/a/../b.png", "/a/"])
+@pytest.mark.parametrize("name", ["", "bad\0path", "/", "/a/../b.png", "/a/"])
 def test_discovery_malformed_paths(repository: Repository, name: str) -> None:
     """Leave malformed and legacy filename-only records unchanged and report them."""
-    repository.connection.execute("INSERT INTO IMAGE (Name, Date) VALUES (?, ?)", (name, str(DAY)))
+    repository.connection.execute(
+        "INSERT INTO IMAGE (Name, Date, FolderId) VALUES (?, ?, ?)",
+        (name, str(DAY), repository._folder_id(Path("/"), DAY)),
+    )
     repository.connection.commit()
     result = discover_missing_folders(repository)
     assert result.candidates == ()
     assert len(result.issues) == 1
-    assert list(repository.image_paths().values()) == [name]
+    assert list(repository.image_paths().values()) == ["/" + name]
 
 
 def test_inaccessible_original_is_not_missing(

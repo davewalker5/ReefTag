@@ -57,7 +57,7 @@ def test_image_identity_uses_full_path(repository: Repository, tmp_path: Path) -
     original = tmp_path / "original" / "frame.PNG"
     relocated = tmp_path / "relocated" / "frame.PNG"
     repository.create(original, DAY, 10, 20, "A", "Alpha")
-    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == str(original)
+    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == original.name
     assert repository.identifications(relocated) == []
     assert repository.image_date(relocated) is None
     repository.create(relocated, DAY, 30, 40, "A", "Alpha")
@@ -78,7 +78,7 @@ def test_relative_image_path_is_stored_as_absolute(
     relative = Path("photos") / "frame.png"
     repository.create_pending(relative, DAY, 10, 20)
     absolute = tmp_path / relative
-    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == str(absolute)
+    assert repository.connection.execute("SELECT Name FROM IMAGE").fetchone()[0] == absolute.name
     assert repository.pending_identifications(absolute) == repository.pending_identifications(
         relative
     )

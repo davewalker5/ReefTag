@@ -102,7 +102,7 @@ def test_category_upgrade_preserves_data(tmp_path: Path, monkeypatch: pytest.Mon
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     for migration in migrations.glob("*.sql"):
-        if not migration.name.startswith("0004"):
+        if migration.name[:4] < "0004":
             shutil.copy(migration, legacy)
     monkeypatch.setattr(db, "MIGRATIONS_PATH", legacy)
     path = tmp_path / "upgrade.db"

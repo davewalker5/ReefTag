@@ -461,13 +461,13 @@ def test_mapping_moves_folder_default(
     add_image(repository, original)
     replacement = destination(tmp_path, "replacement")
     preferences = Preferences(tmp_path / "preferences.ini")
-    preferences.save_folder_date(original, DAY)
+    repository.save_folder_date(original, DAY)
     dialog = FolderMappingDialog(
         repository, discover_missing_folders(repository).candidates, preferences=preferences
     )
     dialog.replacement.setText(str(replacement))
     dialog.confirm_folder()
     assert dialog.changed
-    assert preferences.folder_date(original) is None
-    assert preferences.folder_date(replacement) == DAY
+    assert repository.folder_date(original) is None
+    assert repository.folder_date(replacement) == DAY
     dialog.close()

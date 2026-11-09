@@ -13,6 +13,14 @@ from reef_tag.models import (
     SpeciesImage,
 )
 
+IMAGE_PATHS = """(SELECT im.id, im.Date, im.FurtherExamination, im.FolderId,
+    CASE WHEN f.Path='' THEN im.Name
+         WHEN SUBSTR(f.Path, -1) IN ('/', char(92)) THEN f.Path || im.Name
+         WHEN INSTR(f.Path, char(92))>0 AND INSTR(f.Path, '/')=0
+              THEN f.Path || char(92) || im.Name
+         ELSE f.Path || '/' || im.Name END AS Name
+    FROM IMAGE im JOIN FOLDER f ON f.Id=im.FolderId)"""
+
 
 def image_identity(path: Path) -> str:
     """Identify an image by its resolved absolute filesystem path."""
@@ -28,7 +36,7 @@ class Repository:
 
     def image_paths(self) -> dict[int, str]:
         """Return stored image paths keyed by ID in a single query."""
-        return dict(self.connection.execute("SELECT id, Name FROM IMAGE"))
+        return dict(self.connection.execute(f"SELECT id, Name FROM {IMAGE_PATHS}"))
 
     def update_image_paths(self, changes: tuple[ImagePathChange, ...]) -> None:
         """Atomically apply confirmed paths without changing image IDs or metadata.
@@ -41,16 +49,79 @@ class Repository:
             return
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
+            current_paths = self.image_paths()
+            folders: dict[str, str] = {}
             for change in changes:
-                cursor = self.connection.execute(
-                    "UPDATE IMAGE SET Name=? WHERE id=? AND Name=?",
-                    (change.replacement, change.image_id, change.original),
-                )
-                if cursor.rowcount != 1:
+                if current_paths.get(change.image_id) != change.original:
                     raise ValueError(
                         "Image paths changed during folder mapping. Close the dialog "
                         "and run Check Image Paths again."
                     )
+                original, replacement = Path(change.original), Path(change.replacement)
+                folders[str(original.parent)] = str(replacement.parent)
+                default = self.folder_date(original.parent)
+                assert default is not None
+                folder_id = self._folder_id(replacement.parent, default)
+                self.connection.execute(
+                    "UPDATE IMAGE SET FolderId=?, Name=? WHERE id=?",
+                    (folder_id, replacement.name, change.image_id),
+                )
+            for original in folders:
+                self.connection.execute(
+                    "DELETE FROM FOLDER WHERE Path=? AND NOT EXISTS "
+                    "(SELECT 1 FROM IMAGE WHERE FolderId=FOLDER.Id)",
+                    (original,),
+                )
+
+    def folder_date(self, folder: Path) -> date | None:
+        """Return the database default for a resolved folder, if recorded.
+
+        :param folder: Image directory, which need not currently exist.
+        :return: Default recording date, or None for an unknown folder.
+        """
+        row = self.connection.execute(
+            "SELECT Date FROM FOLDER WHERE Path=?", (str(folder.resolve()),)
+        ).fetchone()
+        return date.fromisoformat(row[0][:10]) if row else None
+
+    def save_folder_date(self, folder: Path, value: date) -> None:
+        """Save a folder default without changing any image dates.
+
+        :param folder: Directory whose default is being set.
+        :param value: Default recording date.
+        """
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO FOLDER (Path, Date) VALUES (?, ?) "
+                "ON CONFLICT(Path) DO UPDATE SET Date=excluded.Date",
+                (str(folder.resolve()), value.isoformat()),
+            )
+
+    def _folder_id(self, folder: Path, value: date) -> int:
+        """Find or create a folder inside the caller's transaction.
+
+        :param folder: Image directory.
+        :param value: Default date used only for a new folder.
+        :return: Persisted folder identifier.
+        """
+        identity = str(folder.resolve())
+        self.connection.execute(
+            "INSERT INTO FOLDER (Path, Date) VALUES (?, ?) ON CONFLICT(Path) DO NOTHING",
+            (identity, value.isoformat()),
+        )
+        return self.connection.execute(
+            "SELECT Id FROM FOLDER WHERE Path=?", (identity,)
+        ).fetchone()[0]
+
+    def _image_key(self, path: Path, value: date) -> tuple[int, str]:
+        """Return the folder ID and filename, creating a folder if needed.
+
+        :param path: Photograph to persist.
+        :param value: Initial folder default for previously unseen directories.
+        :return: Unique image key within this database.
+        """
+        resolved = path.resolve()
+        return self._folder_id(resolved.parent, value), resolved.name
 
     def species(self) -> list[Species]:
         """Return the complete catalogue in deterministic common-name order."""
@@ -65,7 +136,7 @@ class Repository:
     def image_date(self, path: Path) -> date | None:
         """Return a saved footage date, or None for an unrecorded image."""
         row = self.connection.execute(
-            "SELECT Date FROM IMAGE WHERE Name=?", (image_identity(path),)
+            f"SELECT Date FROM {IMAGE_PATHS} WHERE Name=?", (image_identity(path),)
         ).fetchone()
         return date.fromisoformat(row[0]) if row else None
 
@@ -89,7 +160,7 @@ class Repository:
         return [
             SpeciesImage(*row)
             for row in self.connection.execute(
-                "SELECT m.id, m.Name, m.Date, COUNT(i.id) FROM IMAGE m "
+                f"SELECT m.id, m.Name, m.Date, COUNT(i.id) FROM {IMAGE_PATHS} m "
                 "JOIN IDENTIFICATION i ON i.ImageId=m.id WHERE i.SpeciesId=? "
                 "GROUP BY m.id, m.Name, m.Date ORDER BY m.Date, m.Name, m.id",
                 (species_id,),
@@ -100,7 +171,7 @@ class Repository:
         """Return annotation counts by stored image path, excluding untagged images."""
         return dict(
             self.connection.execute(
-                "SELECT m.Name, COUNT(*) FROM IMAGE m "
+                f"SELECT m.Name, COUNT(*) FROM {IMAGE_PATHS} m "
                 "JOIN IDENTIFICATION i ON i.ImageId=m.id GROUP BY m.Name"
             )
         )
@@ -113,7 +184,7 @@ class Repository:
         images: dict[int, set[str]] = {}
         for species_id, name in self.connection.execute(
             "SELECT DISTINCT i.SpeciesId, m.Name FROM IDENTIFICATION i "
-            "JOIN IMAGE m ON m.id=i.ImageId"
+            f"JOIN {IMAGE_PATHS} m ON m.id=i.ImageId"
         ):
             images.setdefault(species_id, set()).add(name)
         return images
@@ -122,7 +193,9 @@ class Repository:
         """Return image paths flagged for further examination, including untagged images."""
         return {
             row[0]
-            for row in self.connection.execute("SELECT Name FROM IMAGE WHERE FurtherExamination=1")
+            for row in self.connection.execute(
+                f"SELECT Name FROM {IMAGE_PATHS} WHERE FurtherExamination=1"
+            )
         }
 
     def set_further_examination(self, path: Path, footage_date: date, enabled: bool) -> None:
@@ -132,26 +205,27 @@ class Repository:
             if not enabled and self.pending_identifications(path):
                 raise ValueError("Resolve all unknown markers before clearing further examination.")
             self.connection.execute(
-                "INSERT INTO IMAGE (Name, Date, FurtherExamination) VALUES (?, ?, ?) "
-                "ON CONFLICT(Name) DO UPDATE SET FurtherExamination=excluded.FurtherExamination",
-                (image_identity(path), footage_date.isoformat(), int(enabled)),
+                "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(FolderId, Name) DO UPDATE SET "
+                "FurtherExamination=excluded.FurtherExamination",
+                (*self._image_key(path, footage_date), footage_date.isoformat(), int(enabled)),
             )
 
     def update_date(self, path: Path, footage_date: date) -> None:
         """Save an image date, creating an untagged record when necessary."""
         with self.connection:
             self.connection.execute(
-                "INSERT INTO IMAGE (Name, Date) VALUES (?, ?) "
-                "ON CONFLICT(Name) DO UPDATE SET Date=excluded.Date",
-                (image_identity(path), footage_date.isoformat()),
+                "INSERT INTO IMAGE (FolderId, Name, Date) VALUES (?, ?, ?) "
+                "ON CONFLICT(FolderId, Name) DO UPDATE SET Date=excluded.Date",
+                (*self._image_key(path, footage_date), footage_date.isoformat()),
             )
 
     def identifications(self, path: Path) -> list[Identification]:
         """Return an image's observations in stable number order."""
         rows = self.connection.execute(
-            """
+            f"""
             SELECT i.id, i.Number, i.X, i.Y, s.id, s.CommonName, s.ScientificName, s.CategoryId
-            FROM IDENTIFICATION i JOIN IMAGE m ON m.id=i.ImageId
+            FROM IDENTIFICATION i JOIN {IMAGE_PATHS} m ON m.id=i.ImageId
             JOIN SPECIES s ON s.id=i.SpeciesId WHERE m.Name=? ORDER BY i.Number
         """,
             (image_identity(path),),
@@ -230,14 +304,14 @@ class Repository:
             species_id = self._resolve_species(common_name, scientific_name, category_id)
             identity = image_identity(path)
             row = self.connection.execute(
-                "SELECT id FROM IMAGE WHERE Name=?", (identity,)
+                f"SELECT id FROM {IMAGE_PATHS} WHERE Name=?", (identity,)
             ).fetchone()
             if row:
                 image_id = row[0]
             else:
                 cursor = self.connection.execute(
-                    "INSERT INTO IMAGE (Name, Date) VALUES (?, ?)",
-                    (identity, footage_date.isoformat()),
+                    "INSERT INTO IMAGE (FolderId, Name, Date) VALUES (?, ?, ?)",
+                    (*self._image_key(path, footage_date), footage_date.isoformat()),
                 )
                 assert cursor.lastrowid is not None
                 image_id = cursor.lastrowid
@@ -292,7 +366,7 @@ class Repository:
             PendingIdentification(*row)
             for row in self.connection.execute(
                 "SELECT p.id, p.X, p.Y FROM PENDING_IDENTIFICATION p "
-                "JOIN IMAGE m ON m.id=p.ImageId WHERE m.Name=? ORDER BY p.id",
+                f"JOIN {IMAGE_PATHS} m ON m.id=p.ImageId WHERE m.Name=? ORDER BY p.id",
                 (image_identity(path),),
             )
         ]
@@ -310,13 +384,13 @@ class Repository:
             raise ValueError("Coordinates must be non-negative integer pixels.")
         with self.connection:
             self.connection.execute(
-                "INSERT INTO IMAGE (Name, Date, FurtherExamination) VALUES (?, ?, 1) "
-                "ON CONFLICT(Name) DO UPDATE SET FurtherExamination=1",
-                (image_identity(path), footage_date.isoformat()),
+                "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, 1) "
+                "ON CONFLICT(FolderId, Name) DO UPDATE SET FurtherExamination=1",
+                (*self._image_key(path, footage_date), footage_date.isoformat()),
             )
             self.connection.execute(
                 "INSERT INTO PENDING_IDENTIFICATION (ImageId, X, Y) "
-                "SELECT id, ?, ? FROM IMAGE WHERE Name=?",
+                f"SELECT id, ?, ? FROM {IMAGE_PATHS} WHERE Name=?",
                 (x, y, image_identity(path)),
             )
 
