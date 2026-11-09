@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QMessageBox,
@@ -24,9 +23,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from reef_tag.folder_mapping import FolderCandidate, discover_missing_folders, validate_replacement
+from reef_tag.folder_mapping import discover_missing_folders
 from reef_tag.preferences import Preferences
 from reef_tag.repositories import Repository
+from reef_tag.ui.folder_editor_dialog import FolderEditorDialog
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,13 +65,15 @@ class FolderManagementDialog(QDialog):
         self.repository = repository
         self.current_folder = current_folder.resolve() if current_folder is not None else None
         self.changed = False
-        self.setWindowTitle("Folder Management")
+        self.setWindowTitle("Folders")
         self.setModal(True)
         self.resize(1100, 460)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["", "Path", "Date", "Images", "Missing", ""])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["", "Path", "Location", "Date", "Images", "Missing", ""]
+        )
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -90,6 +92,7 @@ class FolderManagementDialog(QDialog):
 
     def refresh(self) -> None:
         """Reload every saved folder and check each directly referenced photograph."""
+        locations = {location.id: location.name for location in self.repository.locations()}
         self.folders = self.repository.folders()
         self.table.setRowCount(len(self.folders))
         for row, folder in enumerate(self.folders):
@@ -105,6 +108,7 @@ class FolderManagementDialog(QDialog):
             values = [
                 symbol,
                 str(folder.path),
+                locations.get(folder.location_id, ""),
                 folder.default_date.isoformat(),
                 str(total),
                 str(total - matched),
@@ -112,7 +116,7 @@ class FolderManagementDialog(QDialog):
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if column in (0, 5):
+                if column in (0, 6):
                     item.setForeground(QColor(color if column == 0 else "#388e3c"))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     font = item.font()
@@ -123,49 +127,15 @@ class FolderManagementDialog(QDialog):
         self.table.resizeRowsToContents()
 
     def edit_cell(self, row: int, column: int) -> None:
-        """Choose a replacement path or date, leaving cancelled or failed edits unchanged."""
+        """Open the folder editor from any column and refresh accepted changes."""
         folder = self.folders[row]
         try:
-            if column == 1:
-                selection = QFileDialog.getExistingDirectory(
-                    self, "Select replacement image folder", str(folder.path)
-                )
-                if not selection:
-                    return
-                # Empty folders have no filenames to match, but still require a real directory.
-                if folder.images:
-                    replacement = validate_replacement(
-                        FolderCandidate(folder.path, folder.images), selection
-                    )
-                    destination = replacement.directory
-                    if replacement.matched < replacement.total:
-                        answer = QMessageBox.question(
-                            self,
-                            "Some images were not found",
-                            f"The selected folder contains {replacement.matched} of the "
-                            f"{replacement.total} expected images.\n\n"
-                            f"Update the paths for all {replacement.total} images, including "
-                            "those still missing?",
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                            QMessageBox.StandardButton.Cancel,
-                        )
-                        if answer != QMessageBox.StandardButton.Yes:
-                            return
-                else:
-                    destination = Path(selection).expanduser().resolve(strict=True)
-                    if not destination.is_dir():
-                        raise ValueError("Select an existing replacement folder.")
-                self.repository.relocate_folder(folder, destination)
-                if folder.path == self.current_folder:
-                    self.current_folder = destination
-            elif column == 2:
-                selected = pick_folder_date(self, folder.path, folder.default_date)
-                if selected is None:
-                    return
-                self.repository.save_folder_date(folder.path, selected)
-            else:
+            editor = FolderEditorDialog(self.repository, folder, self)
+            if editor.exec() != QDialog.DialogCode.Accepted:
                 return
             self.changed = True
+            if folder.path == self.current_folder:
+                self.current_folder = editor.destination
             self.refresh()
         except (OSError, ValueError, sqlite3.Error) as error:
             LOGGER.warning("Cannot update folder %s: %s", folder.path, error)

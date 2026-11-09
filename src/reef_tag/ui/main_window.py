@@ -1,4 +1,4 @@
-"""Folder browsing, footage dates and annotation workflow coordination."""
+"""Folder browsing and annotation workflow coordination."""
 
 import csv
 import logging
@@ -6,11 +6,10 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QPointF, Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QDateEdit,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -42,6 +41,7 @@ from reef_tag.ui.folder_mapping_dialog import (
     pick_folder_date,
 )
 from reef_tag.ui.image_view import MAX_BRIGHTNESS, MAX_ZOOM, MIN_BRIGHTNESS, MIN_ZOOM, ImageView
+from reef_tag.ui.location_dialog import LocationsDialog
 from reef_tag.ui.species_dialog import SpeciesDialog
 from reef_tag.ui.species_search_dialog import SpeciesSearchDialog
 
@@ -111,6 +111,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("Manage Categories").triggered.connect(self.edit_categories)
         self.manage_folders_action = tools_menu.addAction("Manage Folders")
         self.manage_folders_action.triggered.connect(self.manage_folders)
+        self.manage_locations_action = tools_menu.addAction("Manage Locations")
+        self.manage_locations_action.triggered.connect(self.manage_locations)
         tools_menu.addSeparator()
         check_paths = tools_menu.addAction("Check Image Paths")
         check_paths.triggered.connect(self.check_image_paths)
@@ -183,17 +185,7 @@ class MainWindow(QMainWindow):
         self.refresh = QPushButton("Refresh Folder")
         self.refresh.setEnabled(False)
         self.refresh.clicked.connect(self.refresh_folder)
-        self.footage_date = QDateEdit(QDate.currentDate())
-        self.footage_date.setCalendarPopup(True)
-        self.footage_date.setDisplayFormat("dd/MM/yyyy")
-        self.footage_date.setMinimumDate(QDate(1, 1, 1))
-        self.footage_date.setSpecialValueText(" ")
-        self.footage_date.setDate(self.footage_date.minimumDate())
-        self.footage_date.setEnabled(False)
-        self.footage_date.dateChanged.connect(self.change_date)
-        footage_date_label = QLabel("Footage Date")
-        footage_date_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        for widget in (choose, self.refresh, footage_date_label, self.footage_date):
+        for widget in (choose, self.refresh):
             controls.addWidget(widget)
         workspace.addLayout(controls)
         observations = QVBoxLayout(right)
@@ -276,8 +268,6 @@ class MainWindow(QMainWindow):
             if dialog.changed:
                 if dialog.current_folder is not None:
                     self.open_folder(dialog.current_folder)
-                if self.current_path is None:
-                    self.show_footage_date(self.folder_default_date)
         except (OSError, sqlite3.Error) as error:
             self.report_error(f"Cannot manage folders: {error}")
 
@@ -321,16 +311,6 @@ class MainWindow(QMainWindow):
     def prompt_default_date(self, folder: Path, initial: date) -> date | None:
         """Ask for a folder default; cancellation leaves the selected folder unchanged."""
         return pick_folder_date(self, folder, initial)
-
-    def show_footage_date(self, value: date | None) -> None:
-        """Display a date or an empty field without triggering a database write."""
-        self.footage_date.blockSignals(True)
-        self.footage_date.setDate(
-            QDate(value.year, value.month, value.day)
-            if value is not None
-            else self.footage_date.minimumDate()
-        )
-        self.footage_date.blockSignals(False)
 
     def report_error(self, message: str) -> None:
         """Log underlying failures and display an actionable modal alert."""
@@ -430,6 +410,13 @@ class MainWindow(QMainWindow):
         except sqlite3.Error as error:
             self.report_error(f"Import completed, but the display could not be refreshed: {error}")
         QMessageBox.information(self, "Import complete", summary.description())
+
+    def manage_locations(self) -> None:
+        """Open geographical location maintenance."""
+        try:
+            LocationsDialog(self.repository, self).exec()
+        except sqlite3.Error as error:
+            self.report_error(f"Cannot load locations: {error}")
 
     def edit_categories(self) -> None:
         """Open category maintenance."""
@@ -615,11 +602,9 @@ class MainWindow(QMainWindow):
         self.preview.set_image(QPixmap(), [])
         self.brightness_controls.setEnabled(False)
         self.current.setRowCount(0)
-        self.footage_date.setEnabled(False)
-        self.show_footage_date(self.folder_default_date)
 
     def select_image(self) -> None:
-        """Decode an image and show its recorded date or the selected folder default."""
+        """Decode an image and show its saved annotations."""
         row = self.files.currentRow()
         self.clear_image()
         self.reset_preview()
@@ -633,13 +618,10 @@ class MainWindow(QMainWindow):
             image = reader.read()
             if image.isNull():
                 raise ValueError(reader.errorString())
-            saved_date = self.repository.image_date(path)
             annotations = self.repository.identifications(path)
             self.pending = self.repository.pending_identifications(path)
             self.current_path = path
             self.annotations = annotations
-            self.show_footage_date(saved_date or self.folder_default_date)
-            self.footage_date.setEnabled(True)
             self.preview.set_image(QPixmap.fromImage(image), annotations)
             self.brightness_controls.setEnabled(True)
             self.populate_current()
@@ -663,17 +645,6 @@ class MainWindow(QMainWindow):
         self.preview.pending = self.pending
         self.preview.annotations = self.annotations
         self.preview.update()
-
-    def change_date(self, value: QDate) -> None:
-        """Persist date edits immediately, including images without identifications."""
-        if self.current_path is None:
-            return
-        footage_date = date(value.year(), value.month(), value.day())
-        try:
-            self.repository.update_date(self.current_path, footage_date)
-        except sqlite3.Error as error:
-            self.report_error(f"Cannot save the footage date: {error}")
-            self.select_image()
 
     def create_identification(self, x: int, y: int) -> None:
         """Open an unsaved annotation at source coordinates."""
@@ -708,8 +679,7 @@ class MainWindow(QMainWindow):
             )
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            value = self.footage_date.date()
-            footage_date = date(value.year(), value.month(), value.day())
+            footage_date = self.folder_default_date or date.today()
             if isinstance(annotation, PendingIdentification):
                 if dialog.deleted:
                     self.repository.delete_pending(annotation.id)
@@ -732,8 +702,6 @@ class MainWindow(QMainWindow):
                     annotation.id, *dialog.names(), category_id=dialog.category_id()
                 )
             else:
-                value = self.footage_date.date()
-                footage_date = date(value.year(), value.month(), value.day())
                 self.repository.create(
                     self.current_path,
                     footage_date,

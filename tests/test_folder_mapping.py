@@ -58,8 +58,8 @@ def test_discovery_empty_database(repository: Repository) -> None:
 def test_discovery_malformed_paths(repository: Repository, name: str) -> None:
     """Leave malformed and legacy filename-only records unchanged and report them."""
     repository.connection.execute(
-        "INSERT INTO IMAGE (Name, Date, FolderId) VALUES (?, ?, ?)",
-        (name, str(DAY), repository._folder_id(Path("/"), DAY)),
+        "INSERT INTO IMAGE (Name, FolderId) VALUES (?, ?)",
+        (name, repository._folder_id(Path("/"), DAY)),
     )
     repository.connection.commit()
     result = discover_missing_folders(repository)
@@ -105,7 +105,8 @@ def test_complete_mapping_preserves_metadata_and_exact_parent(
     before_images = [
         tuple(row)
         for row in repository.connection.execute(
-            "SELECT id, Date, FurtherExamination FROM IMAGE ORDER BY id"
+            "SELECT im.id, f.Date, im.FurtherExamination FROM IMAGE im "
+            "JOIN FOLDER f ON f.Id=im.FolderId ORDER BY im.id"
         )
     ]
     before_identified = repository.identifications(original / "two.png")
@@ -120,7 +121,8 @@ def test_complete_mapping_preserves_metadata_and_exact_parent(
     assert [
         tuple(row)
         for row in repository.connection.execute(
-            "SELECT id, Date, FurtherExamination FROM IMAGE ORDER BY id"
+            "SELECT im.id, f.Date, im.FurtherExamination FROM IMAGE im "
+            "JOIN FOLDER f ON f.Id=im.FolderId ORDER BY im.id"
         )
     ] == before_images
     assert repository.identifications(destination / "two.png") == before_identified

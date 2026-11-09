@@ -61,7 +61,7 @@ def test_image_identity_uses_full_path(repository: Repository, tmp_path: Path) -
     assert repository.identifications(relocated) == []
     assert repository.image_date(relocated) is None
     repository.create(relocated, DAY, 30, 40, "A", "Alpha")
-    repository.update_date(relocated, date(2026, 10, 14))
+    repository.save_folder_date(relocated.parent, date(2026, 10, 14))
     assert repository.image_date(original) == DAY
     assert repository.image_date(relocated) == date(2026, 10, 14)
     assert repository.connection.execute("SELECT COUNT(*) FROM IMAGE").fetchone()[0] == 2
@@ -108,7 +108,7 @@ def test_duplicates_dates_and_restart(tmp_path: Path) -> None:
     connection = connect(database)
     repository = Repository(connection)
     path = tmp_path / "frame.png"
-    repository.update_date(path, DAY)
+    repository.set_further_examination(path, DAY, False)
     assert repository.image_date(path) == DAY
     assert repository.identifications(path) == []
     repository.create(path, DAY, 0, 0, "A", "Alpha")
@@ -117,7 +117,7 @@ def test_duplicates_dates_and_restart(tmp_path: Path) -> None:
     assert repository.image_date(tmp_path / "new.png") is None
     with pytest.raises(ValueError):
         repository.create(path, DAY, 0, 0, " ", "Alpha")
-    repository.update_date(path, date(2026, 10, 14))
+    repository.save_folder_date(path.parent, date(2026, 10, 14))
     connection.close()
     connection = connect(database)
     repository = Repository(connection)
@@ -161,8 +161,8 @@ def test_integer_primary_and_foreign_keys(repository: Repository, tmp_path: Path
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute(
-            "INSERT INTO IMAGE (id, Name, Date) VALUES (?, ?, ?)",
-            ("old-guid", "invalid.png", DAY.isoformat()),
+            "INSERT INTO IMAGE (id, Name, FolderId) VALUES (?, ?, ?)",
+            ("old-guid", "invalid.png", repository.folders()[0].id),
         )
     connection.rollback()
 

@@ -25,7 +25,7 @@ def application():
 
 
 def test_workspace(application: QApplication, tmp_path: Path) -> None:
-    """Load persisted markers, hit-test in screen pixels and retain pending dates."""
+    """Load persisted markers, hit-test in source pixels and keep dates at folder level."""
     image = QImage(400, 200, QImage.Format.Format_RGB32)
     image.fill(QColor("teal"))
     first, second = tmp_path / "a.PNG", tmp_path / "b.jpg"
@@ -41,7 +41,7 @@ def test_workspace(application: QApplication, tmp_path: Path) -> None:
     application.processEvents()
     assert window.current.rowCount() == 1
     assert window.catalogue.rowCount() == 1
-    assert window.footage_date.date().day() == 13
+    assert window.folder_default_date == date(2026, 10, 13)
     mapping = window.preview.geometry_map()
     x, y = mapping.to_preview(200, 100)
     window.preview.marker_clicked.disconnect(window.edit_identification)
@@ -54,12 +54,12 @@ def test_workspace(application: QApplication, tmp_path: Path) -> None:
     QTest.mouseClick(window.preview, Qt.MouseButton.LeftButton, pos=QPoint(1, 1))
     assert click_spy.count() == 0
     window.files.selectRow(1)
-    window.footage_date.setDate(window.footage_date.date().addDays(2))
-    pending = window.footage_date.date()
+    repository.save_folder_date(tmp_path, date(2026, 10, 15))
+    window.open_folder(tmp_path)
     window.files.selectRow(0)
     window.files.selectRow(1)
-    assert window.footage_date.date() == pending
-    assert repository.image_date(second) == pending.toPython()
+    assert window.folder_default_date == date(2026, 10, 15)
+    assert repository.image_date(second) is None
     dialog = SpeciesDialog(repository.species(), None, window)
     dialog.common.setText("Unsaved")
     dialog.scientific.setText("Unsaved species")
@@ -157,7 +157,7 @@ def test_invalid_image_is_recoverable(
     window.files.selectRow(0)
     assert failures and "Cannot load broken.PNG" in failures[0]
     assert window.current_path is None
-    assert not window.footage_date.isEnabled()
+    assert not hasattr(window, "footage_date")
     assert window.preview.pixmap.isNull()
     assert repository.species() == []
     assert connection.execute("SELECT COUNT(*) FROM IMAGE").fetchone()[0] == 0
@@ -385,7 +385,7 @@ def test_last_image_restored_on_restart(application: QApplication, tmp_path: Pat
     assert not restarted.files.item(1, 0).icon().isNull()
     assert not restarted.preview.pixmap.isNull()
     assert restarted.current.rowCount() == 1
-    assert restarted.footage_date.date().day() == 13
+    assert restarted.folder_default_date == date(2026, 10, 13)
     restarted.close()
     path.unlink()
     missing = MainWindow(repository, Preferences(settings_path))
@@ -467,8 +467,7 @@ def test_further_examination_toggle(application: QApplication, tmp_path: Path) -
         )
 
     window.files.selectRow(0)
-    window.footage_date.setDate(window.footage_date.date().addDays(-10))
-    selected_date = window.footage_date.date().toPython()
+    selected_date = repository.folder_date(tmp_path)
     click_flag()
     assert not window.files.item(0, 1).icon().isNull()
     assert window.files.item(0, 0).icon().isNull()
@@ -652,8 +651,11 @@ def test_preview_scrollbars(application: QApplication) -> None:
 def test_folder_default_dates(
     application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Use folder defaults until an image date is saved; never alter other images."""
+    """Use one folder date for all images and edit it solely through folder management."""
+    from PySide6.QtCore import QDate
+
     from reef_tag.preferences import Preferences
+    from reef_tag.ui import folder_mapping_dialog as management
 
     connection = connect(tmp_path / "dates.sqlite3")
     repository = Repository(connection)
@@ -665,14 +667,14 @@ def test_folder_default_dates(
     for name in ("a.png", "b.png"):
         image.save(str(folder / name))
     window = MainWindow(repository, preferences)
-    assert window.footage_date.text().strip() == ""
-    assert not window.footage_date.isEnabled()
+    assert not hasattr(window, "footage_date")
+    assert not hasattr(window, "change_date")
     assert window.manage_folders_action.isEnabled()
     first, second = date(2026, 10, 13), date(2026, 10, 15)
     prompts = []
 
     def choose_default(self, selected_folder, initial):
-        """Record prompts and return the chosen date."""
+        """Record the date prompt for a previously unseen folder."""
         prompts.append(selected_folder)
         return first
 
@@ -680,26 +682,29 @@ def test_folder_default_dates(
     window.open_folder(folder)
     assert prompts == [folder]
     assert repository.folder_date(folder) == first
-    assert window.footage_date.date().toPython() == first
-    assert not window.footage_date.isEnabled()
     window.files.selectRow(0)
-    assert repository.image_date(folder / "a.png") is None
-    window.footage_date.setDate(window.footage_date.date().addDays(1))
-    assert repository.image_date(folder / "a.png") == date(2026, 10, 14)
-    monkeypatch.setattr(MainWindow, "prompt_default_date", lambda *args: second)
-    from reef_tag.ui import folder_mapping_dialog as management
+    assert repository.image_paths() == {}
+    repository.create_pending(folder / "a.png", first, 1, 2)
+    repository.create(folder / "b.png", first, 1, 2, "Fish", "Fish species")
 
-    monkeypatch.setattr(management, "pick_folder_date", lambda *args: second)
+    def save_default(editor):
+        """Save the selected date through the real folder editor."""
+        editor.default_date.setDate(QDate(second.year, second.month, second.day))
+        editor.accept()
+        return editor.result()
+
+    monkeypatch.setattr(management.FolderEditorDialog, "exec", save_default)
     monkeypatch.setattr(
-        management.FolderManagementDialog, "exec", lambda dialog: dialog.edit_cell(0, 2)
+        management.FolderManagementDialog, "exec", lambda dialog: dialog.edit_cell(0, 3)
     )
     window.manage_folders()
-    assert window.footage_date.date().toPython() == date(2026, 10, 14)
+    assert window.folder_default_date == second
+    for name in ("a.png", "b.png"):
+        assert repository.image_date(folder / name) == second
+    assert len(repository.pending_identifications(folder / "a.png")) == 1
+    assert len(repository.identifications(folder / "b.png")) == 1
     window.files.selectRow(1)
-    assert window.footage_date.date().toPython() == second
     window.clear_image()
-    assert window.footage_date.date().toPython() == second
-    assert not window.footage_date.isEnabled()
     monkeypatch.setattr(
         MainWindow, "prompt_default_date", lambda *args: pytest.fail("Repeat prompt")
     )
@@ -708,7 +713,7 @@ def test_folder_default_dates(
     restarted = MainWindow(repository, preferences)
     restarted.open_folder(folder)
     restarted.files.selectRow(0)
-    assert restarted.footage_date.date().toPython() == date(2026, 10, 14)
+    assert restarted.folder_default_date == second
     monkeypatch.setattr(MainWindow, "prompt_default_date", lambda *args: None)
     other = tmp_path / "other"
     other.mkdir()
@@ -719,32 +724,34 @@ def test_folder_default_dates(
     connection.close()
 
 
-def test_date_write_failure_restores_display(
+def test_folder_date_write_failure_preserves_saved_value(
     application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Keep the saved date visible when a database error rejects an edit."""
+    """Keep a failed folder edit open and retain the original date for every image."""
+    from PySide6.QtCore import QDate
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from reef_tag.ui.folder_editor_dialog import FolderEditorDialog
+
     connection = connect(tmp_path / "dates.sqlite3")
     repository = Repository(connection)
-    image = QImage(20, 20, QImage.Format.Format_RGB32)
-    image.fill(QColor("teal"))
-    path = tmp_path / "frame.png"
-    image.save(str(path))
     saved_date = date(2026, 10, 13)
-    repository.update_date(path, saved_date)
-    window = MainWindow(repository)
-    window.open_folder(tmp_path)
-    window.files.selectRow(0)
+    path = tmp_path / "frame.png"
+    repository.create_pending(path, saved_date, 1, 2)
+    editor = FolderEditorDialog(repository, repository.folders()[0])
     failures = []
-    monkeypatch.setattr(window, "report_error", failures.append)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: failures.append(args[2]))
     connection.execute(
-        "CREATE TRIGGER reject_date BEFORE UPDATE OF Date ON IMAGE "
+        "CREATE TRIGGER reject_date BEFORE UPDATE OF Date ON FOLDER "
         "BEGIN SELECT RAISE(ABORT, 'date rejected'); END"
     )
-    window.footage_date.setDate(window.footage_date.date().addDays(1))
+    editor.default_date.setDate(QDate(2026, 10, 14))
+    editor.accept()
     assert failures and "date rejected" in failures[0]
+    assert editor.result() != QDialog.DialogCode.Accepted
+    assert repository.folder_date(tmp_path) == saved_date
     assert repository.image_date(path) == saved_date
-    assert window.footage_date.date().toPython() == saved_date
-    window.close()
+    editor.reject()
     connection.close()
 
 

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from reef_tag.models import Location
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,23 +61,88 @@ def _open_database(path: Path, mode: str) -> sqlite3.Connection:
     return connection
 
 
-def _named_id(connection: sqlite3.Connection, table: str, name: str) -> int:
-    """Resolve a unique case-insensitive location or category name.
+@dataclass(frozen=True)
+class _Sighting:
+    """A distinct species/location pair observed on the selected folder date."""
 
-    :param connection: Destination database connection.
-    :param table: Internal table name, Locations or Categories.
-    :param name: Name to look up.
-    :return: Matching record ID.
-    :raises ValueError: If there is no unique match.
+    species: _Species
+    location: Location
+
+
+def _read_sightings(connection: sqlite3.Connection, selected_date: str) -> list[_Sighting]:
+    """Read eligible observations without changing the source database.
+
+    :param connection: Read-only ReefTag connection with folder locations.
+    :param selected_date: Canonical YYYY-MM-DD folder recording date.
+    :return: Distinct species/location pairs; unlocated folders are excluded.
+    :raises ValueError: If the source predates folder location support.
+    :raises sqlite3.Error: If the source schema or data cannot be read.
     """
-    # Table names are internal constants; user values are always bound parameters.
-    rows = connection.execute(f'SELECT Id, Name FROM "{table}"').fetchall()
-    matches = [row for row in rows if (row["Name"] or "").casefold() == name.casefold()]
-    if len(matches) != 1:
-        raise ValueError(
-            f"Expected exactly one {table} entry named {name!r}; found {len(matches)}."
-        )
-    return matches[0]["Id"]
+    required_columns = {
+        "IMAGE": {"FolderId"},
+        "FOLDER": {"Date", "LocationId"},
+        "LOCATION": {"Id", "Name", "Region", "Country", "Latitude", "Longitude"},
+    }
+    for table, required in required_columns.items():
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if not required.issubset(columns):
+            raise ValueError(
+                "This ReefTag database does not support folder locations. "
+                "Open it in the current ReefTag application to upgrade it, "
+                "then assign locations in Tools > Manage Folders before transferring."
+            )
+    rows = connection.execute(
+        """SELECT DISTINCT s.Id, s.CommonName, s.ScientificName, c.Name,
+                  l.Id, l.Name, l.Region, l.Country, l.Latitude, l.Longitude
+           FROM SPECIES s
+           JOIN IDENTIFICATION i ON i.SpeciesId=s.Id
+           JOIN IMAGE im ON im.Id=i.ImageId
+           JOIN FOLDER f ON f.Id=im.FolderId
+           JOIN LOCATION l ON l.Id=f.LocationId
+           LEFT JOIN CATEGORY c ON c.Id=s.CategoryId
+           WHERE substr(f.Date, 1, 10)=? ORDER BY s.Id, l.Id""",
+        (selected_date,),
+    )
+    return [_Sighting(_Species(*row[:4]), Location(*row[4:])) for row in rows]
+
+
+def _ensure_location(connection: sqlite3.Connection, location: Location, stamp: str) -> int:
+    """Reuse a unique name match unchanged or insert mapped location and audit fields.
+
+    :param connection: Destination connection inside the transfer transaction.
+    :param location: ReefTag location whose region maps to Nature Recorder's county.
+    :param stamp: Current date at midnight for audit fields on new records.
+    :return: Destination location ID.
+    :raises ValueError: If the name is blank or has multiple case-insensitive matches.
+    :raises sqlite3.Error: If persistence fails.
+    """
+    if not location.name.strip():
+        raise ValueError("Source location names must not be blank.")
+    matches = [
+        row["Id"]
+        for row in connection.execute("SELECT Id, Name FROM Locations")
+        if (row["Name"] or "").casefold() == location.name.casefold()
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous location mapping for {location.name!r}.")
+    if matches:
+        return matches[0]
+    cursor = connection.execute(
+        """INSERT INTO Locations
+           (Name, County, Country, Latitude, Longitude, Created_By, Updated_By,
+            Date_Created, Date_Updated) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)""",
+        (
+            location.name,
+            location.region,
+            location.country,
+            location.latitude,
+            location.longitude,
+            stamp,
+            stamp,
+        ),
+    )
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _ensure_category(connection: sqlite3.Connection, name: str, stamp: str) -> int:
@@ -129,46 +196,31 @@ def _match_species(source: _Species, targets: list[_Species]) -> int | None:
 
 
 def transfer(
-    reef_tag_path: Path, nature_recorder_path: Path, location: str, recording_date: str
+    reef_tag_path: Path, nature_recorder_path: Path, recording_date: str
 ) -> TransferResult:
-    """Atomically transfer distinct identified species for the selected image date.
+    """Atomically transfer species and sightings using each folder's date and location.
+
+    Folders without locations are excluded. Existing location details are retained.
 
     :param reef_tag_path: Existing ReefTag database, opened read-only.
     :param nature_recorder_path: Existing Nature Recorder database.
-    :param location: Name of an existing destination location.
     :param recording_date: Date in strict YYYY-MM-DD format.
     :return: Counts of created records and skipped duplicate sightings.
-    :raises ValueError: If inputs or species mappings are invalid or ambiguous.
+    :raises ValueError: If inputs, the source schema or record mappings are invalid.
     :raises sqlite3.Error: If database access fails; destination writes are rolled back.
     """
     selected_date = parse_date(recording_date).isoformat()
     species_messages: list[str] = []
-    if not location.strip():
-        raise ValueError("Location must not be blank.")
     if reef_tag_path.resolve() == nature_recorder_path.resolve():
         raise ValueError("Source and destination must be different database files.")
     with closing(_open_database(reef_tag_path, "ro")) as source:
-        # Older source databases predate categories; preserve their Fish-only transfer.
-        has_categories = any(
-            row["name"] == "CategoryId" for row in source.execute("PRAGMA table_info(SPECIES)")
-        )
-        category_column = "c.Name" if has_categories else "'Fish'"
-        category_join = "LEFT JOIN CATEGORY c ON c.Id=s.CategoryId" if has_categories else ""
-        rows = source.execute(
-            f"""SELECT DISTINCT s.Id, s.CommonName, s.ScientificName, {category_column}
-               FROM SPECIES s
-               JOIN IDENTIFICATION i ON i.SpeciesId = s.Id
-               JOIN IMAGE im ON im.Id = i.ImageId
-               {category_join}
-               WHERE substr(im.Date, 1, 10) = ? ORDER BY s.Id""",
-            (selected_date,),
-        ).fetchall()
-        species = [_Species(*row) for row in rows]
+        sightings = _read_sightings(source, selected_date)
+        species = list({item.species.id: item.species for item in sightings}.values())
+        locations = {item.location.id: item.location for item in sightings}
     with closing(_open_database(nature_recorder_path, "rw")) as destination:
         with destination:
             # Lock before reading mappings to prevent concurrent duplicate inserts.
             destination.execute("BEGIN IMMEDIATE")
-            location_id = _named_id(destination, "Locations", location)
             targets = [
                 _Species(row[0], row[1] or "", row[2] or "")
                 for row in destination.execute("SELECT Id, Name, Scientific_Name FROM Species")
@@ -181,6 +233,7 @@ def transfer(
                     unique_species.append(row)
             stamp = f"{date.today().isoformat()} 00:00:00"
             created_species = created_sightings = skipped = 0
+            species_ids: dict[int, int] = {}
             for row, species_id in zip(species, mappings, strict=True):
                 if species_id is None:
                     # Recheck against inserted rows for case-only aliases in the source catalogue.
@@ -210,6 +263,16 @@ def transfer(
                         f"Skipped species: {row.common_name} ({row.scientific_name}); "
                         f"already exists as ID {species_id}."
                     )
+                species_ids[row.id] = species_id
+            location_ids = {
+                key: _ensure_location(destination, location, stamp)
+                for key, location in locations.items()
+            }
+            # Several source folders or case-only aliases may resolve to the same sighting.
+            sighting_keys = {
+                (location_ids[item.location.id], species_ids[item.species.id]) for item in sightings
+            }
+            for location_id, species_id in sorted(sighting_keys):
                 exists = destination.execute(
                     """SELECT 1 FROM Sightings WHERE LocationId = ? AND SpeciesId = ?
                        AND substr(Date, 1, 10) = ?""",
@@ -252,18 +315,13 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("NATURE_RECORDER_DB"),
         help="Existing Nature Recorder database (default: NATURE_RECORDER_DB).",
     )
-    parser.add_argument(
-        "-l", "--location", required=True, help="Existing destination location name."
-    )
-    parser.add_argument("-d", "--date", required=True, help="Image recording date (YYYY-MM-DD).")
+    parser.add_argument("-d", "--date", required=True, help="Recording date (YYYY-MM-DD).")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if not args.reeftag_db or not args.nature_recorder_db:
         parser.error("Supply both database paths using options or environment variables.")
     try:
-        result = transfer(
-            Path(args.reeftag_db), Path(args.nature_recorder_db), args.location, args.date
-        )
+        result = transfer(Path(args.reeftag_db), Path(args.nature_recorder_db), args.date)
     except (ValueError, OSError, sqlite3.Error) as error:
         print(f"Transfer failed: {error}", file=sys.stderr)
         return 1

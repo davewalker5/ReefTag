@@ -1,6 +1,7 @@
 SELECT  'Excursions'            AS "Metric",
-        COUNT( DISTINCT Date )  AS "Count"
-FROM    IMAGE
+        COUNT( DISTINCT f.Date )  AS "Count"
+FROM    IMAGE im
+JOIN    FOLDER f ON f.Id = im.FolderId
 UNION ALL
 SELECT  'Images',
         COUNT( Id )
@@ -24,8 +25,9 @@ SELECT  'Identifications per Excursion',
             FROM IDENTIFICATION
         ) /
         (
-            SELECT COUNT( DISTINCT Date )
-            FROM IMAGE
+            SELECT COUNT( DISTINCT f.Date )
+            FROM IMAGE im
+            JOIN FOLDER f ON f.Id = im.FolderId
         )
 UNION ALL
 SELECT  'Identifications per Image',

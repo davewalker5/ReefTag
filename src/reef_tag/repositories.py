@@ -1,5 +1,6 @@
 """Transactional image, species and annotation operations."""
 
+import math
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -9,12 +10,13 @@ from reef_tag.models import (
     Folder,
     Identification,
     ImagePathChange,
+    Location,
     PendingIdentification,
     Species,
     SpeciesImage,
 )
 
-IMAGE_PATHS = """(SELECT im.id, im.Date, im.FurtherExamination, im.FolderId,
+IMAGE_PATHS = """(SELECT im.id, SUBSTR(f.Date, 1, 10) AS Date, im.FurtherExamination, im.FolderId,
     CASE WHEN f.Path='' THEN im.Name
          WHEN SUBSTR(f.Path, -1) IN ('/', char(92)) THEN f.Path || im.Name
          WHEN INSTR(f.Path, char(92))>0 AND INSTR(f.Path, '/')=0
@@ -46,9 +48,15 @@ class Repository:
         for image_id, folder_id in self.connection.execute("SELECT id, FolderId FROM IMAGE"):
             images.setdefault(folder_id, {})[image_id] = paths[image_id]
         return tuple(
-            Folder(folder_id, Path(path), date.fromisoformat(value[:10]), images.get(folder_id, {}))
-            for folder_id, path, value in self.connection.execute(
-                "SELECT Id, Path, Date FROM FOLDER ORDER BY Path"
+            Folder(
+                folder_id,
+                Path(path),
+                date.fromisoformat(value[:10]),
+                images.get(folder_id, {}),
+                location_id,
+            )
+            for folder_id, path, value, location_id in self.connection.execute(
+                "SELECT Id, Path, Date, LocationId FROM FOLDER ORDER BY Path"
             )
         )
 
@@ -60,18 +68,54 @@ class Repository:
         :raises ValueError: If the source changed since validation.
         :raises sqlite3.Error: If paths collide; all changes are rolled back.
         """
+        target = next((item for item in self.folders() if item.path == destination.resolve()), None)
+        self.save_folder(
+            folder,
+            destination,
+            target.default_date if target else folder.default_date,
+            target.location_id if target else folder.location_id,
+        )
+
+    def save_folder(
+        self,
+        folder: Folder,
+        destination: Path,
+        default_date: date,
+        location_id: int | None,
+    ) -> None:
+        """Atomically save edited folder metadata and any validated relocation.
+
+        A new path retains the folder ID. An existing destination receives the source
+        images and the explicitly selected date/location; filename collisions roll back
+        every change. All images use the resulting folder date.
+
+        :param folder: Original snapshot, used to detect intervening changes.
+        :param destination: Replacement directory validated by the caller, or the original path.
+        :param default_date: Selected folder default date.
+        :param location_id: Selected location ID, or None to clear it.
+        :raises ValueError: If the original folder changed since the editor opened.
+        :raises sqlite3.Error: If the location is invalid or image filenames collide.
+        """
+        # Keep unedited legacy path spelling intact, including non-native paths.
+        path = str(folder.path) if destination == folder.path else str(destination.resolve())
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             current = next((item for item in self.folders() if item.id == folder.id), None)
             if current != folder:
                 raise ValueError("The folder changed. Close and reopen Folder Management.")
-            target_id = self._folder_id(destination, folder.default_date)
-            if target_id == folder.id:
-                return
+            target = self.connection.execute(
+                "SELECT Id FROM FOLDER WHERE Path=?", (path,)
+            ).fetchone()
+            target_id = target[0] if target else folder.id
+            if target_id != folder.id:
+                self.connection.execute(
+                    "UPDATE IMAGE SET FolderId=? WHERE FolderId=?", (target_id, folder.id)
+                )
+                self.connection.execute("DELETE FROM FOLDER WHERE Id=?", (folder.id,))
             self.connection.execute(
-                "UPDATE IMAGE SET FolderId=? WHERE FolderId=?", (target_id, folder.id)
+                "UPDATE FOLDER SET Path=?, Date=?, LocationId=? WHERE Id=?",
+                (path, default_date.isoformat(), location_id, target_id),
             )
-            self.connection.execute("DELETE FROM FOLDER WHERE Id=?", (folder.id,))
 
     def update_image_paths(self, changes: tuple[ImagePathChange, ...]) -> None:
         """Atomically apply confirmed paths without changing image IDs or metadata.
@@ -96,7 +140,10 @@ class Repository:
                 folders[str(original.parent)] = str(replacement.parent)
                 default = self.folder_date(original.parent)
                 assert default is not None
-                folder_id = self._folder_id(replacement.parent, default)
+                location_id = self.connection.execute(
+                    "SELECT LocationId FROM FOLDER WHERE Path=?", (str(original.parent),)
+                ).fetchone()[0]
+                folder_id = self._folder_id(replacement.parent, default, location_id)
                 self.connection.execute(
                     "UPDATE IMAGE SET FolderId=?, Name=? WHERE id=?",
                     (folder_id, replacement.name, change.image_id),
@@ -120,7 +167,7 @@ class Repository:
         return date.fromisoformat(row[0][:10]) if row else None
 
     def save_folder_date(self, folder: Path, value: date) -> None:
-        """Save a folder default without changing any image dates.
+        """Save the recording date shared by every image in a folder.
 
         :param folder: Directory whose default is being set.
         :param value: Default recording date.
@@ -132,17 +179,19 @@ class Repository:
                 (str(folder.resolve()), value.isoformat()),
             )
 
-    def _folder_id(self, folder: Path, value: date) -> int:
+    def _folder_id(self, folder: Path, value: date, location_id: int | None = None) -> int:
         """Find or create a folder inside the caller's transaction.
 
         :param folder: Image directory.
         :param value: Default date used only for a new folder.
+        :param location_id: Location used only when creating a new folder.
         :return: Persisted folder identifier.
         """
         identity = str(folder.resolve())
         self.connection.execute(
-            "INSERT INTO FOLDER (Path, Date) VALUES (?, ?) ON CONFLICT(Path) DO NOTHING",
-            (identity, value.isoformat()),
+            "INSERT INTO FOLDER (Path, Date, LocationId) VALUES (?, ?, ?) "
+            "ON CONFLICT(Path) DO NOTHING",
+            (identity, value.isoformat(), location_id),
         )
         return self.connection.execute(
             "SELECT Id FROM FOLDER WHERE Path=?", (identity,)
@@ -169,7 +218,7 @@ class Repository:
         ]
 
     def image_date(self, path: Path) -> date | None:
-        """Return a saved footage date, or None for an unrecorded image."""
+        """Return the folder recording date for a saved image, or None if unrecorded."""
         row = self.connection.execute(
             f"SELECT Date FROM {IMAGE_PATHS} WHERE Name=?", (image_identity(path),)
         ).fetchone()
@@ -240,19 +289,10 @@ class Repository:
             if not enabled and self.pending_identifications(path):
                 raise ValueError("Resolve all unknown markers before clearing further examination.")
             self.connection.execute(
-                "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, ?) "
+                "INSERT INTO IMAGE (FolderId, Name, FurtherExamination) VALUES (?, ?, ?) "
                 "ON CONFLICT(FolderId, Name) DO UPDATE SET "
                 "FurtherExamination=excluded.FurtherExamination",
-                (*self._image_key(path, footage_date), footage_date.isoformat(), int(enabled)),
-            )
-
-    def update_date(self, path: Path, footage_date: date) -> None:
-        """Save an image date, creating an untagged record when necessary."""
-        with self.connection:
-            self.connection.execute(
-                "INSERT INTO IMAGE (FolderId, Name, Date) VALUES (?, ?, ?) "
-                "ON CONFLICT(FolderId, Name) DO UPDATE SET Date=excluded.Date",
-                (*self._image_key(path, footage_date), footage_date.isoformat()),
+                (*self._image_key(path, footage_date), int(enabled)),
             )
 
     def identifications(self, path: Path) -> list[Identification]:
@@ -311,7 +351,7 @@ class Repository:
         """Atomically save an identification, optionally replacing an unknown marker.
 
         :param path: Photograph containing the observation.
-        :param footage_date: Date used for a newly recorded photograph.
+        :param footage_date: Initial date used only when creating a previously unseen folder.
         :param x: Original horizontal pixel coordinate for a new identification.
         :param y: Original vertical pixel coordinate for a new identification.
         :param common_name: Selected species common name.
@@ -345,8 +385,8 @@ class Repository:
                 image_id = row[0]
             else:
                 cursor = self.connection.execute(
-                    "INSERT INTO IMAGE (FolderId, Name, Date) VALUES (?, ?, ?)",
-                    (*self._image_key(path, footage_date), footage_date.isoformat()),
+                    "INSERT INTO IMAGE (FolderId, Name) VALUES (?, ?)",
+                    self._image_key(path, footage_date),
                 )
                 assert cursor.lastrowid is not None
                 image_id = cursor.lastrowid
@@ -410,7 +450,7 @@ class Repository:
         """Save an unknown marker and flag its photograph atomically.
 
         :param path: Photograph containing the fish.
-        :param footage_date: Date used only for a newly recorded photograph.
+        :param footage_date: Initial date used only when creating a previously unseen folder.
         :param x: Non-negative horizontal original-image pixel coordinate.
         :param y: Non-negative vertical original-image pixel coordinate.
         :raises ValueError: If coordinates are not non-negative integers.
@@ -419,9 +459,9 @@ class Repository:
             raise ValueError("Coordinates must be non-negative integer pixels.")
         with self.connection:
             self.connection.execute(
-                "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, 1) "
+                "INSERT INTO IMAGE (FolderId, Name, FurtherExamination) VALUES (?, ?, 1) "
                 "ON CONFLICT(FolderId, Name) DO UPDATE SET FurtherExamination=1",
-                (*self._image_key(path, footage_date), footage_date.isoformat()),
+                self._image_key(path, footage_date),
             )
             self.connection.execute(
                 "INSERT INTO PENDING_IDENTIFICATION (ImageId, X, Y) "
@@ -506,3 +546,56 @@ class Repository:
                 != 1
             ):
                 raise ValueError("This species no longer exists.")
+
+    def locations(self) -> list[Location]:
+        """Return geographical locations ordered by name, region and country."""
+        return [
+            Location(*row)
+            for row in self.connection.execute(
+                "SELECT Id, Name, Region, Country, Latitude, Longitude FROM LOCATION "
+                "ORDER BY Name COLLATE NOCASE, Region COLLATE NOCASE, Country COLLATE NOCASE, Id"
+            )
+        ]
+
+    def save_location(
+        self,
+        name: str,
+        region: str,
+        country: str,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        location_id: int | None = None,
+    ) -> None:
+        """Create or update a location atomically after validating its fields.
+
+        :param name: Required location name.
+        :param region: Required administrative region.
+        :param country: Required country.
+        :param latitude: Optional decimal degrees in [-90, 90].
+        :param longitude: Optional decimal degrees in [-180, 180].
+        :param location_id: Existing record ID, or None to create a record.
+        :raises ValueError: If fields are invalid or the record no longer exists.
+        """
+        name, region, country = name.strip(), region.strip(), country.strip()
+        for label, value in (("name", name), ("region", region), ("country", country)):
+            if not value:
+                raise ValueError(f"Enter a location {label}.")
+        for label, value, limit in (("Latitude", latitude, 90), ("Longitude", longitude, 180)):
+            if value is not None and (not math.isfinite(value) or not -limit <= value <= limit):
+                raise ValueError(f"{label} must be between {-limit} and {limit} degrees.")
+        values = (name, region, country, latitude, longitude)
+        with self.connection:
+            if location_id is None:
+                self.connection.execute(
+                    "INSERT INTO LOCATION (Name, Region, Country, Latitude, Longitude) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    values,
+                )
+            else:
+                cursor = self.connection.execute(
+                    "UPDATE LOCATION SET Name=?, Region=?, Country=?, Latitude=?, Longitude=? "
+                    "WHERE Id=?",
+                    (*values, location_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("This location no longer exists.")

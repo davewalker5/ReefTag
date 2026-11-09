@@ -71,3 +71,16 @@ class Folder:
     path: Path
     default_date: date
     images: dict[int, str]
+    location_id: int | None = None
+
+
+@dataclass(frozen=True)
+class Location:
+    """A geographical location with optional coordinates in decimal degrees."""
+
+    id: int
+    name: str
+    region: str
+    country: str
+    latitude: float | None = None
+    longitude: float | None = None

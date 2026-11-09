@@ -66,8 +66,12 @@ def test_populated_upgrade_and_rollback(tmp_path: Path, monkeypatch: pytest.Monk
         backend.connection.execute("PRAGMA foreign_keys=ON")
         with backend.lock():
             pending = backend.to_rollback(read_migrations(str(migrations)))
-            backend.rollback_migrations([m for m in pending if m.id == "0005_folder_defaults"])
-        assert sorted(backend.connection.execute("SELECT * FROM IMAGE")) == sorted(images)
+            backend.rollback_migrations([m for m in pending if m.id >= "0005_folder_defaults"])
+        # Phase 3 deliberately replaces former image overrides with their folder date.
+        expected = [
+            (key, name, "2026-10-11" if key == 9 else day, flag) for key, name, day, flag in images
+        ]
+        assert sorted(backend.connection.execute("SELECT * FROM IMAGE")) == sorted(expected)
         assert backend.connection.execute("SELECT * FROM IDENTIFICATION").fetchall() == [
             (1, 9, 1, 1, 10, 20)
         ]
@@ -88,7 +92,7 @@ def test_defaults_persist_and_mapping_preserves_destination_default(tmp_path: Pa
     repository.save_folder_date(empty, second)
     repository.create_pending(old / "a.png", first, 1, 2)
     repository.save_folder_date(old, second)
-    assert repository.image_date(old / "a.png") == first
+    assert repository.image_date(old / "a.png") == second
     repository.save_folder_date(new, first)
     image_id = next(iter(repository.image_paths()))
     repository.update_image_paths(
