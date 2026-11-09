@@ -15,8 +15,8 @@ SELECT  'Unknown Markers',
 FROM    PENDING_IDENTIFICATION
 UNION ALL
 SELECT  'Species',
-        COUNT( Id )
-FROM    SPECIES
+        COUNT( DISTINCT SpeciesId )
+FROM    IDENTIFICATION
 UNION ALL
 SELECT  'Identifications per Excursion',
         (
