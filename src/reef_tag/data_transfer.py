@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from reef_tag.repositories import Repository
+from reef_tag.repositories import IMAGE_PATHS, Repository
 
 COLUMNS = (
     "Date",
@@ -63,14 +63,14 @@ def folder_records(repository: Repository, folder: Path) -> list[TransferRecord]
     :return: Records in image, type and marker order.
     """
     rows = repository.connection.execute(
-        """SELECT m.Date, m.Name, m.FurtherExamination, 'IDENTIFICATION',
+        f"""SELECT m.Date, m.Name, m.FurtherExamination, 'IDENTIFICATION',
                   i.Number, i.X, i.Y, COALESCE(c.Name, ''), s.CommonName, s.ScientificName
-           FROM IMAGE m JOIN IDENTIFICATION i ON i.ImageId=m.id
+           FROM {IMAGE_PATHS} m JOIN IDENTIFICATION i ON i.ImageId=m.id
            JOIN SPECIES s ON s.id=i.SpeciesId LEFT JOIN CATEGORY c ON c.Id=s.CategoryId
            UNION ALL
            SELECT m.Date, m.Name, m.FurtherExamination, 'UNKNOWN',
                   NULL, p.X, p.Y, '', '', ''
-           FROM IMAGE m JOIN PENDING_IDENTIFICATION p ON p.ImageId=m.id
+           FROM {IMAGE_PATHS} m JOIN PENDING_IDENTIFICATION p ON p.ImageId=m.id
            ORDER BY 2, 4, 5, 6, 7"""
     )
     folder = folder.resolve()
@@ -174,15 +174,24 @@ def _species_id(connection: sqlite3.Connection, record: TransferRecord) -> int:
 
 def _import_record(connection: sqlite3.Connection, record: TransferRecord) -> bool:
     """Merge one observation and return whether a new marker was inserted."""
-    connection.execute(
-        "INSERT INTO IMAGE (Name, Date, FurtherExamination) VALUES (?, ?, ?) "
-        "ON CONFLICT(Name) DO UPDATE SET "
-        "FurtherExamination=MAX(IMAGE.FurtherExamination, excluded.FurtherExamination)",
-        (record.image, record.footage_date, int(record.examination or record.kind == "UNKNOWN")),
+    repository = Repository(connection)
+    folder_id, filename = repository._image_key(
+        Path(record.image), date.fromisoformat(record.footage_date)
     )
-    image_id = connection.execute("SELECT id FROM IMAGE WHERE Name=?", (record.image,)).fetchone()[
-        0
-    ]
+    connection.execute(
+        "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(FolderId, Name) DO UPDATE SET "
+        "FurtherExamination=MAX(IMAGE.FurtherExamination, excluded.FurtherExamination)",
+        (
+            folder_id,
+            filename,
+            record.footage_date,
+            int(record.examination or record.kind == "UNKNOWN"),
+        ),
+    )
+    image_id = connection.execute(
+        "SELECT id FROM IMAGE WHERE FolderId=? AND Name=?", (folder_id, filename)
+    ).fetchone()[0]
     if record.kind == "UNKNOWN":
         if connection.execute(
             "SELECT 1 FROM PENDING_IDENTIFICATION WHERE ImageId=? AND X=? AND Y=?",

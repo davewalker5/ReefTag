@@ -279,13 +279,13 @@ class MainWindow(QMainWindow):
     def open_folder(self, folder: Path) -> None:
         """Display and scan a folder without selecting or modifying any image."""
         try:
-            default_date = self.preferences.folder_date(folder)
+            default_date = self.repository.folder_date(folder)
             if default_date is None:
                 default_date = self.prompt_default_date(folder, date.today())
                 if default_date is None:
                     return
-                self.preferences.save_folder_date(folder, default_date)
-        except OSError as error:
+                self.repository.save_folder_date(folder, default_date)
+        except (OSError, sqlite3.Error) as error:
             self.report_error(f"Cannot save or read the folder default date: {error}")
             return
         self.folder_default_date = default_date
@@ -327,8 +327,8 @@ class MainWindow(QMainWindow):
         if selected is None:
             return
         try:
-            self.preferences.save_folder_date(self.folder, selected)
-        except OSError as error:
+            self.repository.save_folder_date(self.folder, selected)
+        except (OSError, sqlite3.Error) as error:
             self.report_error(f"Cannot save the folder default date: {error}")
             return
         self.folder_default_date = selected
