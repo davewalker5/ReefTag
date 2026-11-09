@@ -759,7 +759,7 @@ def test_csv_menu_workflow(
     window = MainWindow(repository)
     assert window.import_action.isEnabled()
     assert not window.export_action.isEnabled()
-    assert [action.text() for action in window.menuBar().actions()] == ["File", "Tools"]
+    assert [action.text() for action in window.menuBar().actions()] == ["File", "Edit", "Tools"]
     window.open_folder(tmp_path)
     assert window.export_action.isEnabled()
     warnings = []

@@ -26,6 +26,7 @@ class ImageView(QWidget):
         """Initialise a neutral, inactive preview."""
         super().__init__()
         self.pixmap = QPixmap()
+        self.empty_message = "Choose a folder and image"
         self.brightness = 0
         self.zoom = 1.0
         self.pan_x = 0.0
@@ -174,9 +175,7 @@ class ImageView(QWidget):
         mapping = self.geometry_map()
         if mapping is None:
             painter.setPen(QColor("#b9d7db"))
-            painter.drawText(
-                self._preview_rect(), Qt.AlignmentFlag.AlignCenter, "Choose a folder and image"
-            )
+            painter.drawText(self._preview_rect(), Qt.AlignmentFlag.AlignCenter, self.empty_message)
             return
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         left, top = mapping.offset

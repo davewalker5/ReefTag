@@ -4,6 +4,16 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class SpeciesImage:
+    """An existing image and its count of identifications of one species."""
+
+    id: int
+    path: str
+    footage_date: str
+    count: int
+
+
+@dataclass(frozen=True)
 class ImagePathChange:
     """A proposed path update guarded by the image's current stored path."""
 
