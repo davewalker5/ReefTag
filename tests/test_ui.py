@@ -667,7 +667,7 @@ def test_folder_default_dates(
     window = MainWindow(repository, preferences)
     assert window.footage_date.text().strip() == ""
     assert not window.footage_date.isEnabled()
-    assert not window.set_default_date_action.isEnabled()
+    assert window.manage_folders_action.isEnabled()
     first, second = date(2026, 10, 13), date(2026, 10, 15)
     prompts = []
 
@@ -687,7 +687,13 @@ def test_folder_default_dates(
     window.footage_date.setDate(window.footage_date.date().addDays(1))
     assert repository.image_date(folder / "a.png") == date(2026, 10, 14)
     monkeypatch.setattr(MainWindow, "prompt_default_date", lambda *args: second)
-    window.set_default_date()
+    from reef_tag.ui import folder_mapping_dialog as management
+
+    monkeypatch.setattr(management, "pick_folder_date", lambda *args: second)
+    monkeypatch.setattr(
+        management.FolderManagementDialog, "exec", lambda dialog: dialog.edit_cell(0, 2)
+    )
+    window.manage_folders()
     assert window.footage_date.date().toPython() == date(2026, 10, 14)
     window.files.selectRow(1)
     assert window.footage_date.date().toPython() == second

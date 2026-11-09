@@ -1,6 +1,8 @@
 """Immutable domain records."""
 
 from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -59,3 +61,13 @@ class Category:
     id: int
     name: str
     species_count: int = 0
+
+
+@dataclass(frozen=True)
+class Folder:
+    """A saved folder default and the image records associated with it."""
+
+    id: int
+    path: Path
+    default_date: date
+    images: dict[int, str]

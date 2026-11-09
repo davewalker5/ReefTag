@@ -1,4 +1,4 @@
-"""Dialog navigation and automatic/manual folder recovery integration."""
+"""Folder management status, immediate edits and startup/manual integration."""
 
 import os
 import sqlite3
@@ -8,15 +8,12 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from reef_tag.db import connect
-from reef_tag.folder_mapping import discover_missing_folders
 from reef_tag.repositories import Repository
-from reef_tag.ui.folder_mapping_dialog import FolderMappingDialog, MappingStatus, check_image_paths
+from reef_tag.ui import folder_mapping_dialog as management
+from reef_tag.ui.folder_mapping_dialog import FolderManagementDialog, check_image_paths
 from reef_tag.ui.main_window import MainWindow
 
 DAY = date(2026, 10, 13)
@@ -24,358 +21,178 @@ DAY = date(2026, 10, 13)
 
 @pytest.fixture(scope="session")
 def application():
-    """Use the shared offscreen Qt application for recovery dialogs."""
+    """Share one offscreen Qt application."""
     return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture
 def repository(tmp_path: Path):
-    """Keep all mapping actions in a fresh temporary database."""
+    """Keep edits in an isolated database."""
     connection = connect(tmp_path / "mapping.sqlite3")
     yield Repository(connection)
     connection.close()
 
 
 def add_image(repository: Repository, directory: Path, filename: str = "one.png") -> None:
-    """Record an observation without requiring its source photograph to exist."""
-    repository.create(directory / filename, DAY, 1, 2, "A", "Alpha")
+    """Record an image independently of its filesystem availability."""
+    repository.create_pending(directory / filename, DAY, 1, 2)
 
 
-def destination(tmp_path: Path, name: str, filenames: tuple[str, ...] = ("one.png",)) -> Path:
-    """Create a directly matching destination for a test mapping."""
-    directory = tmp_path / name
-    directory.mkdir()
-    for filename in filenames:
-        (directory / filename).touch()
-    return directory
+def destination(tmp_path: Path, names: tuple[str, ...] = ("one.png",)) -> Path:
+    """Make a replacement containing the requested filenames."""
+    folder = tmp_path / "new"
+    folder.mkdir()
+    for name in names:
+        (folder / name).touch()
+    return folder
 
 
-@pytest.mark.parametrize("with_image", [False, True])
-def test_no_dialog_for_healthy_startup_and_manual_success(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    with_image: bool,
-) -> None:
-    """Startup is silent; an explicit check reports success without checking individual files."""
-    if with_image:
-        add_image(repository, tmp_path)
-    messages = []
-
-    def unexpected_dialog(dialog):
-        """Fail if a healthy database prompts for a replacement."""
-        pytest.fail("Unexpected mapping dialog")
-
-    monkeypatch.setattr(FolderMappingDialog, "exec", unexpected_dialog)
-    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[2]))
-    assert not check_image_paths(repository)
-    assert messages == []
-    assert not check_image_paths(repository, manual=True)
-    assert messages == ["All image folders referenced by ReefTag were found."]
-
-
-def test_navigation_retains_edits_without_saving(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Back and Next only navigate, retaining edits and respecting the end boundaries."""
-    for name in ("a", "b", "c"):
-        add_image(repository, tmp_path / name)
-    before = repository.image_paths()
-    errors = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda *args: errors.append(args[2]))
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    dialog.show()
-    application.processEvents()
-    assert not dialog.back.isEnabled()
-    assert dialog.next.isEnabled()
-    assert dialog.next.text() == "Next >>"
-    assert dialog.done_button.text() == "Done"
-    buttons = (dialog.back, dialog.next, dialog.skip, dialog.done_button)
-    assert [button.x() for button in buttons] == sorted(button.x() for button in buttons)
-    assert (
-        dialog.done_button.geometry().right()
-        == dialog.width() - dialog.layout().contentsMargins().right() - 1
-    )
-    assert dialog.back.x() > dialog.layout().contentsMargins().left()
-    dialog.replacement.setText("retained first selection")
-    dialog.next.click()
-    assert dialog.index == 1
-    assert dialog.back.isEnabled() and dialog.next.isEnabled()
-    dialog.replacement.setText("retained second selection")
-    dialog.back.click()
-    assert dialog.replacement.text() == "retained first selection"
-    assert not dialog.back.isEnabled()
-    dialog.next.click()
-    assert dialog.replacement.text() == "retained second selection"
-    dialog.next.click()
-    assert dialog.index == 2
-    assert not dialog.next.isEnabled()
-    assert dialog.next.text() == "Next >>"
-    dialog.go_next()
-    assert dialog.index == 2
-    assert repository.image_paths() == before
-    assert not dialog.changed
-    assert errors == []
-    dialog.close()
-
-
-def test_single_candidate_disables_both_navigation_buttons(
-    application: QApplication, repository: Repository, tmp_path: Path
-) -> None:
-    """A single folder keeps Next's label and leaves Skip and Done available."""
-    add_image(repository, tmp_path / "old")
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    assert not dialog.back.isEnabled()
-    assert not dialog.next.isEnabled()
-    assert dialog.next.text() == "Next >>"
-    assert dialog.skip.isEnabled() and dialog.done_button.isEnabled()
-    dialog.close()
-
-
-@pytest.mark.parametrize("completion", ["enter", "focus"])
-def test_typed_path_saves_on_completion_without_unexpected_navigation(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    completion: str,
-) -> None:
-    """Keyboard and focus completion save edits without advancing the folder twice."""
-    first, second = tmp_path / "a", tmp_path / "b"
-    add_image(repository, first)
-    add_image(repository, second)
-    replacement = destination(tmp_path, "new")
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    dialog.show()
-    application.processEvents()
-    dialog.replacement.setFocus()
-    dialog.replacement.selectAll()
-    QTest.keyClicks(dialog.replacement, str(replacement))
-    if completion == "enter":
-        QTest.keyClick(dialog.replacement, Qt.Key.Key_Return)
-        assert dialog.index == 0
-    else:
-        QTest.mouseClick(dialog.next, Qt.MouseButton.LeftButton)
-        assert dialog.index == 1
-        dialog.back.click()
-    assert dialog.isVisible() and dialog.changed
-    assert dialog.replacement.isReadOnly()
-    assert set(repository.image_paths().values()) == {
-        str(replacement / "one.png"),
-        str(second / "one.png"),
+def test_table_status_counts_and_current_folder(application, repository, tmp_path):
+    """Include all saved folders and distinguish all, some and no matching images."""
+    for name in ("all", "some", "none", "gone", "empty"):
+        folder = tmp_path / name
+        if name != "gone":
+            folder.mkdir()
+        repository.save_folder_date(folder, DAY)
+        if name != "empty":
+            for filename in ("one.png", "two.png"):
+                add_image(repository, folder, filename)
+                if name == "all" or (name == "some" and filename == "one.png"):
+                    (folder / filename).touch()
+    dialog = FolderManagementDialog(repository, current_folder=tmp_path / "some")
+    rows = {
+        folder.path.name: [dialog.table.item(row, col).text() for col in range(6)]
+        for row, folder in enumerate(dialog.folders)
     }
-    dialog.done_button.click()
-
-
-@pytest.mark.parametrize("finish", ["skip", "done_button", "close"])
-def test_skip_and_close_preserve_unresolved_paths(
-    application: QApplication, repository: Repository, tmp_path: Path, finish: str
-) -> None:
-    """The only candidate can always be left unresolved without blocking normal operation."""
-    add_image(repository, tmp_path / "old")
-    before = repository.image_paths()
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    dialog.show()
-    dialog.replacement.setText("uncommitted selection")
-    assert not dialog.back.isEnabled()
-    assert dialog.next.text() == "Next >>"
-    if finish == "close":
-        dialog.close()
-    else:
-        getattr(dialog, finish).click()
-    assert not dialog.isVisible()
-    assert repository.image_paths() == before
-    assert not dialog.changed
-
-
-def test_completed_edit_keeps_invalid_replacement_open(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Completed edits validate immediately, retaining input and data after rejection."""
-    add_image(repository, tmp_path / "old")
-    before = repository.image_paths()
-    errors = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda *args: errors.append(args[2]))
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    dialog.show()
-    dialog.replacement.setText(str(tmp_path / "absent"))
-    dialog.replacement.editingFinished.emit()
-    assert errors
-    assert dialog.isVisible()
-    assert dialog.index == 0
-    assert repository.image_paths() == before
+    assert rows["all"][0] == rows["empty"][0] == "✓"
+    assert rows["some"][0] == "?"
+    assert rows["none"][0] == rows["gone"][0] == "✱"
+    assert rows["some"][2:] == [DAY.isoformat(), "2", "1", "←"]
+    assert rows["gone"][3:5] == ["2", "2"]
     dialog.close()
 
 
-def test_partial_confirmation_cancellation_and_all_path_updates(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Partial recovery requires consent and relocates both matched and missing paths."""
+@pytest.mark.parametrize(
+    "answer", [QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Yes]
+)
+def test_partial_mapping_confirmation(application, repository, tmp_path, monkeypatch, answer):
+    """Cancelled partial mappings preserve data; confirmed mappings move every image."""
     original = tmp_path / "old"
-    add_image(repository, original, "one.png")
-    add_image(repository, original, "two.png")
-    replacement = destination(tmp_path, "new")
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    dialog.show()
-    dialog.replacement.setText(str(replacement))
-    questions = []
-    replies = iter((QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Yes))
-
-    def answer(*args):
-        """Capture the explanation and choose Cancel before explicitly confirming."""
-        questions.append(args[2])
-        dialog.replacement.editingFinished.emit()  # Do not re-enter saving on focus changes.
-        assert args[4] == QMessageBox.StandardButton.Cancel
-        return next(replies)
-
-    monkeypatch.setattr(QMessageBox, "question", answer)
-    before = repository.image_paths()
-    dialog.replacement.editingFinished.emit()
-    assert dialog.isVisible()
-    assert not dialog.changed
-    assert repository.image_paths() == before
-    dialog.replacement.editingFinished.emit()
-    assert dialog.isVisible()
-    assert dialog.changed
-    dialog.done_button.click()
-    assert not dialog.isVisible()
-    assert dialog.result() == QDialog.DialogCode.Accepted
-    assert "1 of the 2 expected images" in questions[0]
-    assert "all 2 images, including those still missing" in questions[0]
-    assert set(repository.image_paths().values()) == {
-        str(replacement / "one.png"),
-        str(replacement / "two.png"),
-    }
-
-
-def test_database_failure_keeps_current_candidate_and_paths(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed transaction leaves the dialog available for correction or skipping."""
-    original = tmp_path / "old"
-    for name in ("one.png", "two.png"):
-        add_image(repository, original, name)
-    replacement = destination(tmp_path, "new", ("one.png", "two.png"))
-    add_image(repository, replacement, "two.png")
-    errors = []
-    monkeypatch.setattr(QMessageBox, "critical", lambda *args: errors.append(args[2]))
-    before = repository.image_paths()
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    dialog.show()
-    dialog.replacement.setText(str(replacement))
-    dialog.replacement.editingFinished.emit()
-    assert errors and "No paths were updated" in errors[0]
-    assert dialog.isVisible()
-    assert dialog.index == 0
-    assert not dialog.changed
-    assert repository.image_paths() == before
-    dialog.skip.click()
-
-
-def test_browse_saves_mapping_immediately_without_advancing(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancelling browse preserves data; selecting a matching folder saves it immediately."""
-    add_image(repository, tmp_path / "a")
-    add_image(repository, tmp_path / "b")
-    replacement = destination(tmp_path, "new")
-    dialog = FolderMappingDialog(repository, discover_missing_folders(repository).candidates)
-    dialog.show()
-    before = repository.image_paths()
-    original_label = dialog.original_path.text()
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: "")
-    dialog.browse.click()
-    assert repository.image_paths() == before
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(replacement))
-    dialog.browse.click()
-    assert dialog.replacement.text() == str(replacement)
-    assert dialog.original_path.text() == original_label
-    assert dialog.selections[0].status is MappingStatus.CONFIRMED
-    assert not dialog.skip.isEnabled()
-    assert dialog.index == 0 and dialog.isVisible()
-    dialog.next.click()
-    assert dialog.skip.isEnabled()
-    dialog.back.click()
-    assert not dialog.skip.isEnabled()
-    assert dialog.replacement.isReadOnly()
-    assert not dialog.browse.isEnabled()
-    dialog.done_button.click()
-    assert not dialog.isVisible() and dialog.changed
-    assert set(repository.image_paths().values()) == {
-        str(replacement / "one.png"),
-        str(tmp_path / "b" / "one.png"),
-    }
-
-
-def test_tools_command_runs_fresh_check_and_refreshes_indicators(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A manual recovery makes saved tags, flags and species filters visible immediately."""
-    original, replacement = tmp_path / "old", tmp_path / "new"
-    replacement.mkdir()
-    image = QImage(40, 20, QImage.Format.Format_RGB32)
-    image.fill(QColor("teal"))
-    image.save(str(replacement / "one.png"))
     add_image(repository, original)
-    repository.create_pending(original / "one.png", DAY, 3, 4)
+    add_image(repository, original, "two.png")
+    replacement = destination(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(replacement))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: answer)
+    dialog = FolderManagementDialog(repository, current_folder=original)
+    dialog.edit_cell(0, 1)
+    confirmed = answer == QMessageBox.StandardButton.Yes
+    assert dialog.changed == confirmed
+    expected = replacement if confirmed else original
+    assert {Path(path).parent for path in repository.image_paths().values()} == {expected}
+    assert dialog.current_folder == expected
+    assert repository.folder_date(expected) == DAY
+    assert dialog.table.item(0, 4).text() == ("1" if confirmed else "2")
+    dialog.close()
+
+
+@pytest.mark.parametrize("selection", ["cancel", "invalid", "zero", "collision", "success"])
+def test_mapping_outcomes(application, repository, tmp_path, monkeypatch, selection):
+    """Only a validated, collision-free selection commits, preserving annotations."""
+    old = tmp_path / "old"
+    add_image(repository, old)
+    replacement = destination(tmp_path, () if selection == "zero" else ("one.png",))
+    if selection == "collision":
+        add_image(repository, replacement)
+    value = (
+        ""
+        if selection == "cancel"
+        else str(tmp_path / "absent" if selection == "invalid" else replacement)
+    )
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: value)
+    errors = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: errors.append(args[2]))
+    before = repository.image_paths()
+    dialog = FolderManagementDialog(repository)
+    row = next(i for i, folder in enumerate(dialog.folders) if folder.path == old)
+    dialog.edit_cell(row, 1)
+    assert dialog.changed == (selection == "success")
+    if selection == "success":
+        assert repository.folder_date(old) is None
+        assert len(repository.pending_identifications(replacement / "one.png")) == 1
+    else:
+        assert repository.image_paths() == before
+        assert bool(errors) == (selection != "cancel")
+    dialog.close()
+
+
+def test_empty_folder_move_and_date_edit(application, repository, tmp_path, monkeypatch):
+    """Folders with no images remain editable, and date writes persist immediately."""
+    old = tmp_path / "old"
+    repository.save_folder_date(old, DAY)
+    replacement = destination(tmp_path, ())
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(replacement))
+    dialog = FolderManagementDialog(repository)
+    dialog.edit_cell(0, 1)
+    assert repository.folder_date(old) is None
+    second = date(2026, 11, 1)
+    monkeypatch.setattr(management, "pick_folder_date", lambda *args: second)
+    dialog.edit_cell(0, 2)
+    assert repository.folder_date(replacement) == second
+    monkeypatch.setattr(management, "pick_folder_date", lambda *args: None)
+    dialog.edit_cell(0, 2)
+    assert repository.folder_date(replacement) == second
+    dialog.close()
+
+
+def test_menu_and_active_default_refresh(application, repository, tmp_path, monkeypatch):
+    """Management is always enabled and date changes reach the active footage default."""
     window = MainWindow(repository)
-    window.open_folder(replacement)
-    window.filtered_species = {repository.species()[0].id}
-    window.apply_species_filters()
-    assert window.files.isRowHidden(0)
-    dialogs = []
-
-    def map_folder(dialog: FolderMappingDialog) -> int:
-        """Confirm the selected destination as an interactive user would."""
-        dialogs.append(dialog)
-        dialog.replacement.setText(str(replacement))
-        dialog.replacement.editingFinished.emit()
-        dialog.done_button.click()
-        return dialog.result()
-
-    monkeypatch.setattr(FolderMappingDialog, "exec", map_folder)
-    messages = []
-    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[2]))
     tools = next(action.menu() for action in window.menuBar().actions() if action.text() == "Tools")
-    action = next(action for action in tools.actions() if action.text() == "Check Image Paths")
-    action.trigger()
-    assert len(dialogs) == 1
-    assert not window.files.isRowHidden(0)
-    assert not window.files.item(0, 0).icon().isNull()
-    assert not window.files.item(0, 1).icon().isNull()
-    window.files.selectRow(0)
-    assert len(window.annotations) == len(window.pending) == 1
-    action.trigger()
-    assert len(dialogs) == 1
-    assert messages == ["All image folders referenced by ReefTag were found."]
+    assert [action.text() for action in tools.actions()] == [
+        "Manage Categories",
+        "Manage Folders",
+        "",
+        "Check Image Paths",
+    ]
+    assert tools.actions()[2].isSeparator()
+    assert window.manage_folders_action.isEnabled()
+    repository.save_folder_date(tmp_path, DAY)
+    window.open_folder(tmp_path)
+    second = date(2026, 11, 1)
+    monkeypatch.setattr(management, "pick_folder_date", lambda *args: second)
+
+    def edit(dialog):
+        """Save a date through the actual table handler."""
+        dialog.edit_cell(0, 2)
+        return 0
+
+    monkeypatch.setattr(FolderManagementDialog, "exec", edit)
+    window.manage_folders_action.trigger()
+    assert window.folder_default_date == second
+    assert window.footage_date.date().toPython() == second
     window.close()
 
 
-def test_check_database_error_is_nonfatal(
-    application: QApplication, repository: Repository, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Report a discovery failure and return control to startup or the calling window."""
+@pytest.mark.parametrize("missing", [False, True])
+def test_startup_check_and_manual_success(application, repository, tmp_path, monkeypatch, missing):
+    """Keep healthy startup silent and show one management window for missing folders."""
+    add_image(repository, tmp_path / "gone" if missing else tmp_path)
+    dialogs, messages = [], []
+    monkeypatch.setattr(FolderManagementDialog, "exec", lambda dialog: dialogs.append(dialog))
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[2]))
+    assert not check_image_paths(repository)
+    assert len(dialogs) == int(missing)
+    assert not messages
+    assert not check_image_paths(repository, manual=True)
+    assert len(dialogs) == 2 * int(missing)
+    assert bool(messages) != missing
+
+
+def test_check_database_error_is_nonfatal(application, repository, monkeypatch):
+    """Report discovery errors without blocking application startup."""
 
     def fail_read():
-        """Simulate a database read failure."""
+        """Simulate an unavailable database."""
         raise sqlite3.OperationalError("database unavailable")
 
     errors = []
@@ -385,89 +202,57 @@ def test_check_database_error_is_nonfatal(
     assert errors == ["database unavailable"]
 
 
+def test_merge_preserves_destination_default_and_rejects_stale_snapshot(repository, tmp_path):
+    """Folder merges preserve existing defaults and detect intervening image changes."""
+    old, new = tmp_path / "old", tmp_path / "new"
+    add_image(repository, old)
+    other_day = date(2026, 10, 15)
+    repository.save_folder_date(new, other_day)
+    folder = next(folder for folder in repository.folders() if folder.path == old)
+    add_image(repository, old, "two.png")
+    before = repository.image_paths()
+    with pytest.raises(ValueError, match="folder changed"):
+        repository.relocate_folder(folder, new)
+    assert repository.image_paths() == before
+    folder = next(folder for folder in repository.folders() if folder.path == old)
+    repository.relocate_folder(folder, new)
+    assert repository.folder_date(new) == other_day
+    assert repository.folder_date(old) is None
+    assert len(repository.pending_identifications(new / "one.png")) == 1
+
+
 @pytest.mark.parametrize("missing", [False, True])
-def test_startup_checks_before_normal_window_and_skipping_continues(
-    application: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool
-) -> None:
-    """Run the real startup entry point, skipping recovery and entering normal operation."""
+def test_startup_checks_before_main_window(application, tmp_path, monkeypatch, missing):
+    """A missing directory opens management before normal session restoration."""
     import reef_tag.__main__ as startup
 
     database = tmp_path / "startup.sqlite3"
     connection = connect(database)
-    old = tmp_path / "old"
+    folder = tmp_path / "old"
     if not missing:
-        old.mkdir()
-    add_image(Repository(connection), old)
+        folder.mkdir()
+    add_image(Repository(connection), folder)
     connection.close()
-    events = []
-    windows = []
+    events, windows = [], []
 
-    def skip_mapping(dialog: FolderMappingDialog) -> int:
-        """Leave the missing folder unresolved during automatic recovery."""
-        events.append("mapping")
-        dialog.done_button.click()
+    def close_management(dialog):
+        """Leave paths unresolved and let startup continue."""
+        events.append("management")
+        dialog.accept()
         return dialog.result()
 
-    def normal_window(repository: Repository) -> MainWindow:
-        """Verify recovery has already run before normal session restoration."""
+    def main_window(repository):
+        """Record when startup constructs the normal window."""
         events.append("window")
         window = MainWindow(repository)
         windows.append(window)
         return window
 
-    monkeypatch.setattr(FolderMappingDialog, "exec", skip_mapping)
+    monkeypatch.setattr(FolderManagementDialog, "exec", close_management)
     monkeypatch.setattr(startup, "QApplication", lambda args: application)
     monkeypatch.setattr(application, "exec", lambda: 0)
     monkeypatch.setattr(startup, "database_path", lambda: database)
-    monkeypatch.setattr(startup, "MainWindow", normal_window)
+    monkeypatch.setattr(startup, "MainWindow", main_window)
     assert startup.main() == 0
-    assert events == (["mapping", "window"] if missing else ["window"])
+    assert events == (["management", "window"] if missing else ["window"])
     windows[0].close()
-    connection = connect(database)
-    assert list(Repository(connection).image_paths().values()) == [str(old / "one.png")]
-    connection.close()
-
-
-def test_file_removed_after_listing_is_reported(
-    application: QApplication,
-    repository: Repository,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Missing photographs fail gracefully without losing their saved identifications."""
-    image = QImage(40, 20, QImage.Format.Format_RGB32)
-    path = tmp_path / "one.png"
-    image.save(str(path))
-    add_image(repository, tmp_path)
-    window = MainWindow(repository)
-    window.open_folder(tmp_path)
-    path.unlink()
-    errors = []
-    monkeypatch.setattr(window, "report_error", errors.append)
-    window.files.selectRow(0)
-    assert errors and "Cannot load one.png" in errors[0]
-    assert window.current_path is None
-    assert len(repository.identifications(path)) == 1
-    window.close()
-
-
-def test_mapping_moves_folder_default(
-    application: QApplication, repository: Repository, tmp_path: Path
-) -> None:
-    """A committed folder recovery also moves its saved recording default."""
-    from reef_tag.preferences import Preferences
-
-    original = tmp_path / "missing"
-    add_image(repository, original)
-    replacement = destination(tmp_path, "replacement")
-    preferences = Preferences(tmp_path / "preferences.ini")
-    repository.save_folder_date(original, DAY)
-    dialog = FolderMappingDialog(
-        repository, discover_missing_folders(repository).candidates, preferences=preferences
-    )
-    dialog.replacement.setText(str(replacement))
-    dialog.confirm_folder()
-    assert dialog.changed
-    assert repository.folder_date(original) is None
-    assert repository.folder_date(replacement) == DAY
-    dialog.close()
