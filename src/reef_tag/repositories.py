@@ -16,7 +16,7 @@ from reef_tag.models import (
     SpeciesImage,
 )
 
-IMAGE_PATHS = """(SELECT im.id, im.Date, im.FurtherExamination, im.FolderId,
+IMAGE_PATHS = """(SELECT im.id, SUBSTR(f.Date, 1, 10) AS Date, im.FurtherExamination, im.FolderId,
     CASE WHEN f.Path='' THEN im.Name
          WHEN SUBSTR(f.Path, -1) IN ('/', char(92)) THEN f.Path || im.Name
          WHEN INSTR(f.Path, char(92))>0 AND INSTR(f.Path, '/')=0
@@ -87,7 +87,7 @@ class Repository:
 
         A new path retains the folder ID. An existing destination receives the source
         images and the explicitly selected date/location; filename collisions roll back
-        every change. Image dates remain unchanged until phase 3.
+        every change. All images use the resulting folder date.
 
         :param folder: Original snapshot, used to detect intervening changes.
         :param destination: Replacement directory validated by the caller, or the original path.
@@ -167,7 +167,7 @@ class Repository:
         return date.fromisoformat(row[0][:10]) if row else None
 
     def save_folder_date(self, folder: Path, value: date) -> None:
-        """Save a folder default without changing any image dates.
+        """Save the recording date shared by every image in a folder.
 
         :param folder: Directory whose default is being set.
         :param value: Default recording date.
@@ -218,7 +218,7 @@ class Repository:
         ]
 
     def image_date(self, path: Path) -> date | None:
-        """Return a saved footage date, or None for an unrecorded image."""
+        """Return the folder recording date for a saved image, or None if unrecorded."""
         row = self.connection.execute(
             f"SELECT Date FROM {IMAGE_PATHS} WHERE Name=?", (image_identity(path),)
         ).fetchone()
@@ -289,19 +289,10 @@ class Repository:
             if not enabled and self.pending_identifications(path):
                 raise ValueError("Resolve all unknown markers before clearing further examination.")
             self.connection.execute(
-                "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, ?) "
+                "INSERT INTO IMAGE (FolderId, Name, FurtherExamination) VALUES (?, ?, ?) "
                 "ON CONFLICT(FolderId, Name) DO UPDATE SET "
                 "FurtherExamination=excluded.FurtherExamination",
-                (*self._image_key(path, footage_date), footage_date.isoformat(), int(enabled)),
-            )
-
-    def update_date(self, path: Path, footage_date: date) -> None:
-        """Save an image date, creating an untagged record when necessary."""
-        with self.connection:
-            self.connection.execute(
-                "INSERT INTO IMAGE (FolderId, Name, Date) VALUES (?, ?, ?) "
-                "ON CONFLICT(FolderId, Name) DO UPDATE SET Date=excluded.Date",
-                (*self._image_key(path, footage_date), footage_date.isoformat()),
+                (*self._image_key(path, footage_date), int(enabled)),
             )
 
     def identifications(self, path: Path) -> list[Identification]:
@@ -360,7 +351,7 @@ class Repository:
         """Atomically save an identification, optionally replacing an unknown marker.
 
         :param path: Photograph containing the observation.
-        :param footage_date: Date used for a newly recorded photograph.
+        :param footage_date: Initial date used only when creating a previously unseen folder.
         :param x: Original horizontal pixel coordinate for a new identification.
         :param y: Original vertical pixel coordinate for a new identification.
         :param common_name: Selected species common name.
@@ -394,8 +385,8 @@ class Repository:
                 image_id = row[0]
             else:
                 cursor = self.connection.execute(
-                    "INSERT INTO IMAGE (FolderId, Name, Date) VALUES (?, ?, ?)",
-                    (*self._image_key(path, footage_date), footage_date.isoformat()),
+                    "INSERT INTO IMAGE (FolderId, Name) VALUES (?, ?)",
+                    self._image_key(path, footage_date),
                 )
                 assert cursor.lastrowid is not None
                 image_id = cursor.lastrowid
@@ -459,7 +450,7 @@ class Repository:
         """Save an unknown marker and flag its photograph atomically.
 
         :param path: Photograph containing the fish.
-        :param footage_date: Date used only for a newly recorded photograph.
+        :param footage_date: Initial date used only when creating a previously unseen folder.
         :param x: Non-negative horizontal original-image pixel coordinate.
         :param y: Non-negative vertical original-image pixel coordinate.
         :raises ValueError: If coordinates are not non-negative integers.
@@ -468,9 +459,9 @@ class Repository:
             raise ValueError("Coordinates must be non-negative integer pixels.")
         with self.connection:
             self.connection.execute(
-                "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, 1) "
+                "INSERT INTO IMAGE (FolderId, Name, FurtherExamination) VALUES (?, ?, 1) "
                 "ON CONFLICT(FolderId, Name) DO UPDATE SET FurtherExamination=1",
-                (*self._image_key(path, footage_date), footage_date.isoformat()),
+                self._image_key(path, footage_date),
             )
             self.connection.execute(
                 "INSERT INTO PENDING_IDENTIFICATION (ImageId, X, Y) "

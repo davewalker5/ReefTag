@@ -198,7 +198,7 @@ def test_menu_and_active_default_refresh(application, repository, tmp_path, monk
     monkeypatch.setattr(FolderManagementDialog, "exec", edit)
     window.manage_folders_action.trigger()
     assert window.folder_default_date == second
-    assert window.footage_date.date().toPython() == second
+    assert not hasattr(window, "footage_date")
     window.close()
 
 

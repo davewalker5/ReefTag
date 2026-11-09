@@ -131,7 +131,7 @@ def _match_species(source: _Species, targets: list[_Species]) -> int | None:
 def transfer(
     reef_tag_path: Path, nature_recorder_path: Path, location: str, recording_date: str
 ) -> TransferResult:
-    """Atomically transfer distinct identified species for the selected image date.
+    """Atomically transfer distinct identified species for the selected recording date.
 
     :param reef_tag_path: Existing ReefTag database, opened read-only.
     :param nature_recorder_path: Existing Nature Recorder database.
@@ -154,13 +154,19 @@ def transfer(
         )
         category_column = "c.Name" if has_categories else "'Fish'"
         category_join = "LEFT JOIN CATEGORY c ON c.Id=s.CategoryId" if has_categories else ""
+        has_image_dates = any(
+            row["name"] == "Date" for row in source.execute("PRAGMA table_info(IMAGE)")
+        )
+        date_column = "im.Date" if has_image_dates else "f.Date"
+        folder_join = "" if has_image_dates else "JOIN FOLDER f ON f.Id=im.FolderId"
         rows = source.execute(
             f"""SELECT DISTINCT s.Id, s.CommonName, s.ScientificName, {category_column}
                FROM SPECIES s
                JOIN IDENTIFICATION i ON i.SpeciesId = s.Id
                JOIN IMAGE im ON im.Id = i.ImageId
                {category_join}
-               WHERE substr(im.Date, 1, 10) = ? ORDER BY s.Id""",
+               {folder_join}
+               WHERE substr({date_column}, 1, 10) = ? ORDER BY s.Id""",
             (selected_date,),
         ).fetchall()
         species = [_Species(*row) for row in rows]
@@ -255,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-l", "--location", required=True, help="Existing destination location name."
     )
-    parser.add_argument("-d", "--date", required=True, help="Image recording date (YYYY-MM-DD).")
+    parser.add_argument("-d", "--date", required=True, help="Recording date (YYYY-MM-DD).")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if not args.reeftag_db or not args.nature_recorder_db:

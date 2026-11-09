@@ -224,3 +224,29 @@ def test_uncategorized_transfer_rolls_back(databases: tuple[Path, Path]) -> None
         assert connection.execute("SELECT COUNT(*) FROM Categories").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM Species").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM Sightings").fetchone()[0] == 0
+
+
+def test_transfer_uses_folder_dates(databases: tuple[Path, Path], tmp_path: Path) -> None:
+    """Read phase-three dates while retaining transfer compatibility with older schemas."""
+    from reef_tag.db import connect
+    from reef_tag.repositories import Repository
+
+    _, target = databases
+    source = tmp_path / "phase3.db"
+    connection = connect(source)
+    repository = Repository(connection)
+    repository.save_category("Fish")
+    category_id = repository.categories()[0].id
+    folder = tmp_path / "photos"
+    repository.create(
+        folder / "a.png", date(2026, 10, 13), 1, 2, "A", "Alpha", category_id=category_id
+    )
+    repository.create(
+        folder / "b.png", date(2026, 10, 14), 1, 2, "B", "Beta", category_id=category_id
+    )
+    repository.save_folder_date(folder, date(2026, 10, 15))
+    connection.close()
+    before = source.read_bytes()
+    assert transfer(source, target, "Reef", DAY) == TransferResult(0, 0, 0)
+    assert transfer(source, target, "Reef", "2026-10-15") == TransferResult(2, 2, 0)
+    assert source.read_bytes() == before

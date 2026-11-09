@@ -41,7 +41,7 @@ def repository(tmp_path: Path) -> Iterator[Repository]:
 
 
 def test_save_and_clear_folder_location(repository: Repository) -> None:
-    """Save and clear a location without changing image dates or observations."""
+    """Save and clear a location, applying folder dates while preserving observations."""
     folder = repository.folders()[0]
     image = Path(next(iter(folder.images.values())))
     original = repository.pending_identifications(image)
@@ -51,7 +51,7 @@ def test_save_and_clear_folder_location(repository: Repository) -> None:
     assert updated.id == folder.id
     assert updated.location_id is None
     assert updated.default_date == second
-    assert repository.image_date(image) == DAY
+    assert repository.image_date(image) == second
     assert repository.pending_identifications(image) == original
     repository.save_folder_date(folder.path, DAY)
     repository.save_folder(
@@ -231,7 +231,7 @@ def test_folder_location_upgrade_and_rollback(
         backend.connection.execute("PRAGMA foreign_keys=ON")
         with backend.lock():
             pending = backend.to_rollback(read_migrations(str(migrations)))
-            backend.rollback_migrations([m for m in pending if m.id == "0007_folder_locations"])
+            backend.rollback_migrations([m for m in pending if m.id >= "0007_folder_locations"])
         assert (
             tuple(
                 backend.connection.execute(

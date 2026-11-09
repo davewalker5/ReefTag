@@ -179,13 +179,12 @@ def _import_record(connection: sqlite3.Connection, record: TransferRecord) -> bo
         Path(record.image), date.fromisoformat(record.footage_date)
     )
     connection.execute(
-        "INSERT INTO IMAGE (FolderId, Name, Date, FurtherExamination) VALUES (?, ?, ?, ?) "
+        "INSERT INTO IMAGE (FolderId, Name, FurtherExamination) VALUES (?, ?, ?) "
         "ON CONFLICT(FolderId, Name) DO UPDATE SET "
         "FurtherExamination=MAX(IMAGE.FurtherExamination, excluded.FurtherExamination)",
         (
             folder_id,
             filename,
-            record.footage_date,
             int(record.examination or record.kind == "UNKNOWN"),
         ),
     )
@@ -222,7 +221,7 @@ def _import_record(connection: sqlite3.Connection, record: TransferRecord) -> bo
 def import_csv(repository: Repository, path: Path) -> TransferSummary:
     """Validate and import an entire CSV atomically, skipping exact marker duplicates.
 
-    Existing image dates and species metadata are retained. Examination flags are merged.
+    Existing folder dates and species metadata are retained. Examination flags are merged.
 
     :param repository: Destination database.
     :param path: UTF-8 CSV previously exported by ReefTag.
