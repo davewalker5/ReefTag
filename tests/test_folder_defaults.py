@@ -66,7 +66,7 @@ def test_populated_upgrade_and_rollback(tmp_path: Path, monkeypatch: pytest.Monk
         backend.connection.execute("PRAGMA foreign_keys=ON")
         with backend.lock():
             pending = backend.to_rollback(read_migrations(str(migrations)))
-            backend.rollback_migrations([m for m in pending if m.id == "0005_folder_defaults"])
+            backend.rollback_migrations([m for m in pending if m.id >= "0005_folder_defaults"])
         assert sorted(backend.connection.execute("SELECT * FROM IMAGE")) == sorted(images)
         assert backend.connection.execute("SELECT * FROM IDENTIFICATION").fetchall() == [
             (1, 9, 1, 1, 10, 20)

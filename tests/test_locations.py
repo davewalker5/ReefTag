@@ -104,11 +104,11 @@ def test_location_upgrade_preserves_existing_data(tmp_path: Path, monkeypatch: p
     path = tmp_path / "upgrade.db"
     connection = db.connect(path)
     connection.executescript("INSERT INTO FOLDER (Path, Date) VALUES ('reef', '2026-11-09');")
-    original = tuple(connection.execute("SELECT * FROM FOLDER").fetchone())
+    original = tuple(connection.execute("SELECT Id, Path, Date FROM FOLDER").fetchone())
     connection.close()
     monkeypatch.setattr(db, "MIGRATIONS_PATH", migrations)
     connection = db.connect(path)
-    assert tuple(connection.execute("SELECT * FROM FOLDER").fetchone()) == original
+    assert tuple(connection.execute("SELECT Id, Path, Date FROM FOLDER").fetchone()) == original
     Repository(connection).save_location("Reef", "Region", "Country")
     connection.close()
     connection = db.connect(path)

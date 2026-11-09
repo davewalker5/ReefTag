@@ -71,6 +71,7 @@ class Folder:
     path: Path
     default_date: date
     images: dict[int, str]
+    location_id: int | None = None
 
 
 @dataclass(frozen=True)

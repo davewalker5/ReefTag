@@ -48,9 +48,15 @@ class Repository:
         for image_id, folder_id in self.connection.execute("SELECT id, FolderId FROM IMAGE"):
             images.setdefault(folder_id, {})[image_id] = paths[image_id]
         return tuple(
-            Folder(folder_id, Path(path), date.fromisoformat(value[:10]), images.get(folder_id, {}))
-            for folder_id, path, value in self.connection.execute(
-                "SELECT Id, Path, Date FROM FOLDER ORDER BY Path"
+            Folder(
+                folder_id,
+                Path(path),
+                date.fromisoformat(value[:10]),
+                images.get(folder_id, {}),
+                location_id,
+            )
+            for folder_id, path, value, location_id in self.connection.execute(
+                "SELECT Id, Path, Date, LocationId FROM FOLDER ORDER BY Path"
             )
         )
 
@@ -62,18 +68,54 @@ class Repository:
         :raises ValueError: If the source changed since validation.
         :raises sqlite3.Error: If paths collide; all changes are rolled back.
         """
+        target = next((item for item in self.folders() if item.path == destination.resolve()), None)
+        self.save_folder(
+            folder,
+            destination,
+            target.default_date if target else folder.default_date,
+            target.location_id if target else folder.location_id,
+        )
+
+    def save_folder(
+        self,
+        folder: Folder,
+        destination: Path,
+        default_date: date,
+        location_id: int | None,
+    ) -> None:
+        """Atomically save edited folder metadata and any validated relocation.
+
+        A new path retains the folder ID. An existing destination receives the source
+        images and the explicitly selected date/location; filename collisions roll back
+        every change. Image dates remain unchanged until phase 3.
+
+        :param folder: Original snapshot, used to detect intervening changes.
+        :param destination: Replacement directory validated by the caller, or the original path.
+        :param default_date: Selected folder default date.
+        :param location_id: Selected location ID, or None to clear it.
+        :raises ValueError: If the original folder changed since the editor opened.
+        :raises sqlite3.Error: If the location is invalid or image filenames collide.
+        """
+        # Keep unedited legacy path spelling intact, including non-native paths.
+        path = str(folder.path) if destination == folder.path else str(destination.resolve())
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             current = next((item for item in self.folders() if item.id == folder.id), None)
             if current != folder:
                 raise ValueError("The folder changed. Close and reopen Folder Management.")
-            target_id = self._folder_id(destination, folder.default_date)
-            if target_id == folder.id:
-                return
+            target = self.connection.execute(
+                "SELECT Id FROM FOLDER WHERE Path=?", (path,)
+            ).fetchone()
+            target_id = target[0] if target else folder.id
+            if target_id != folder.id:
+                self.connection.execute(
+                    "UPDATE IMAGE SET FolderId=? WHERE FolderId=?", (target_id, folder.id)
+                )
+                self.connection.execute("DELETE FROM FOLDER WHERE Id=?", (folder.id,))
             self.connection.execute(
-                "UPDATE IMAGE SET FolderId=? WHERE FolderId=?", (target_id, folder.id)
+                "UPDATE FOLDER SET Path=?, Date=?, LocationId=? WHERE Id=?",
+                (path, default_date.isoformat(), location_id, target_id),
             )
-            self.connection.execute("DELETE FROM FOLDER WHERE Id=?", (folder.id,))
 
     def update_image_paths(self, changes: tuple[ImagePathChange, ...]) -> None:
         """Atomically apply confirmed paths without changing image IDs or metadata.
@@ -98,7 +140,10 @@ class Repository:
                 folders[str(original.parent)] = str(replacement.parent)
                 default = self.folder_date(original.parent)
                 assert default is not None
-                folder_id = self._folder_id(replacement.parent, default)
+                location_id = self.connection.execute(
+                    "SELECT LocationId FROM FOLDER WHERE Path=?", (str(original.parent),)
+                ).fetchone()[0]
+                folder_id = self._folder_id(replacement.parent, default, location_id)
                 self.connection.execute(
                     "UPDATE IMAGE SET FolderId=?, Name=? WHERE id=?",
                     (folder_id, replacement.name, change.image_id),
@@ -134,17 +179,19 @@ class Repository:
                 (str(folder.resolve()), value.isoformat()),
             )
 
-    def _folder_id(self, folder: Path, value: date) -> int:
+    def _folder_id(self, folder: Path, value: date, location_id: int | None = None) -> int:
         """Find or create a folder inside the caller's transaction.
 
         :param folder: Image directory.
         :param value: Default date used only for a new folder.
+        :param location_id: Location used only when creating a new folder.
         :return: Persisted folder identifier.
         """
         identity = str(folder.resolve())
         self.connection.execute(
-            "INSERT INTO FOLDER (Path, Date) VALUES (?, ?) ON CONFLICT(Path) DO NOTHING",
-            (identity, value.isoformat()),
+            "INSERT INTO FOLDER (Path, Date, LocationId) VALUES (?, ?, ?) "
+            "ON CONFLICT(Path) DO NOTHING",
+            (identity, value.isoformat(), location_id),
         )
         return self.connection.execute(
             "SELECT Id FROM FOLDER WHERE Path=?", (identity,)

@@ -687,9 +687,17 @@ def test_folder_default_dates(
     window.footage_date.setDate(window.footage_date.date().addDays(1))
     assert repository.image_date(folder / "a.png") == date(2026, 10, 14)
     monkeypatch.setattr(MainWindow, "prompt_default_date", lambda *args: second)
+    from PySide6.QtCore import QDate
+
     from reef_tag.ui import folder_mapping_dialog as management
 
-    monkeypatch.setattr(management, "pick_folder_date", lambda *args: second)
+    def save_default(editor):
+        """Save the selected default through the folder editor."""
+        editor.default_date.setDate(QDate(second.year, second.month, second.day))
+        editor.accept()
+        return editor.result()
+
+    monkeypatch.setattr(management.FolderEditorDialog, "exec", save_default)
     monkeypatch.setattr(
         management.FolderManagementDialog, "exec", lambda dialog: dialog.edit_cell(0, 2)
     )
